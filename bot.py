@@ -34,6 +34,7 @@ async def start_command(client, message: Message):
 ✅ Scheduled posting to main channel
 ✅ Supports video files & direct links
 ✅ Bulk upload support
+✅ MongoDB database (persistent)
 
 **How to use:**
 1. Forward videos to storage channel
@@ -58,7 +59,7 @@ async def start_command(client, message: Message):
 # ==================== STATS COMMAND ====================
 @bot.on_message(filters.command("stats") & filters.user(config.ADMIN_ID))
 async def stats_command(client, message: Message):
-    stats = database.get_queue_stats()
+    stats = await database.get_queue_stats()
     
     text = f"""📊 **Queue Statistics**
 
@@ -96,7 +97,7 @@ async def handle_storage_file(client, message: Message):
             thumbnail_file_id = file_obj.thumbs[0].file_id
         
         # Add to queue
-        queue_id = database.add_to_queue(
+        queue_id = await database.add_to_queue(
             message_id=message.id,
             file_name=file_name,
             file_id=file_id,
@@ -111,7 +112,7 @@ async def handle_storage_file(client, message: Message):
                 f"✅ Added to queue!\n\n"
                 f"📝 Title: {title}\n"
                 f"📦 Size: {file_size / (1024*1024):.2f} MB\n"
-                f"🆔 Queue ID: {queue_id}"
+                f"🆔 Queue ID: {queue_id[:8]}..."
             )
             print(f"[QUEUE] Added video: {file_name} (ID: {queue_id})")
         else:
@@ -139,7 +140,7 @@ async def handle_storage_link(client, message: Message):
         description = '\n'.join(lines[2:]) if len(lines) > 2 else None
         
         # Add to queue
-        queue_id = database.add_to_queue(
+        queue_id = await database.add_to_queue(
             message_id=message.id,
             file_name=title,
             file_url=video_url,
@@ -152,7 +153,7 @@ async def handle_storage_link(client, message: Message):
                 f"✅ URL added to queue!\n\n"
                 f"🔗 URL: {video_url}\n"
                 f"📝 Title: {title}\n"
-                f"🆔 Queue ID: {queue_id}"
+                f"🆔 Queue ID: {queue_id[:8]}..."
             )
             print(f"[QUEUE] Added URL: {title} (ID: {queue_id})")
         else:
@@ -173,48 +174,49 @@ async def upload_worker():
     while upload_worker_running:
         try:
             # Get pending uploads
-            pending = database.get_pending_uploads(limit=1)
+            pending = await database.get_pending_uploads(limit=1)
             
             if not pending:
                 await asyncio.sleep(10)  # Wait 10 seconds if queue is empty
                 continue
             
             item = pending[0]
-            print(f"[WORKER] Processing: {item.title} (ID: {item.id})")
+            queue_id = str(item['_id'])
+            print(f"[WORKER] Processing: {item['title']} (ID: {queue_id[:8]}...)")
             
             # Update status to uploading
-            database.update_upload_status(item.id, 'uploading')
+            await database.update_upload_status(queue_id, 'uploading')
             
             # Upload to LuluStream
             result = None
             
-            if item.file_url:
+            if item.get('file_url'):
                 # Upload by URL
-                print(f"[WORKER] Uploading by URL: {item.file_url}")
+                print(f"[WORKER] Uploading by URL: {item['file_url']}")
                 result = lulu_client.upload_by_url(
-                    video_url=item.file_url,
-                    title=item.title,
-                    description=item.description
+                    video_url=item['file_url'],
+                    title=item['title'],
+                    description=item.get('description')
                 )
             
-            elif item.file_id:
+            elif item.get('file_id'):
                 # Download file from Telegram and upload
-                print(f"[WORKER] Downloading from Telegram: {item.file_id}")
+                print(f"[WORKER] Downloading from Telegram: {item['file_id']}")
                 
                 # Create temp file
                 temp_dir = tempfile.mkdtemp()
-                temp_file = os.path.join(temp_dir, item.file_name)
+                temp_file = os.path.join(temp_dir, item['file_name'])
                 
                 try:
                     # Download file
-                    await bot.download_media(item.file_id, file_name=temp_file)
+                    await bot.download_media(item['file_id'], file_name=temp_file)
                     print(f"[WORKER] Downloaded to: {temp_file}")
                     
                     # Upload to LuluStream
                     result = lulu_client.upload_file(
                         file_path=temp_file,
-                        title=item.title,
-                        description=item.description
+                        title=item['title'],
+                        description=item.get('description')
                     )
                     
                 finally:
@@ -231,24 +233,24 @@ async def upload_worker():
                 filecode = result['filecode']
                 url = result['url']
                 
-                database.update_upload_status(
-                    item.id,
+                await database.update_upload_status(
+                    queue_id,
                     'uploaded',
                     lulustream_file_code=filecode,
                     lulustream_url=url
                 )
                 
-                print(f"[WORKER] ✅ Uploaded: {item.title}")
+                print(f"[WORKER] ✅ Uploaded: {item['title']}")
                 print(f"[WORKER] URL: {url}")
                 
             else:
                 error_msg = result.get('error', 'Unknown error') if result else 'Upload failed'
-                database.update_upload_status(
-                    item.id,
+                await database.update_upload_status(
+                    queue_id,
                     'failed',
                     error_message=error_msg
                 )
-                database.increment_retry_count(item.id)
+                await database.increment_retry_count(queue_id)
                 print(f"[WORKER] ❌ Failed: {error_msg}")
             
         except Exception as e:
@@ -264,7 +266,7 @@ async def post_to_main_channel():
         print("[SCHEDULER] Posting batch to main channel...")
         
         # Get uploaded videos that haven't been posted
-        videos = database.get_uploaded_not_posted(limit=config.VIDEOS_PER_BATCH)
+        videos = await database.get_uploaded_not_posted(limit=config.VIDEOS_PER_BATCH)
         
         if not videos:
             print("[SCHEDULER] No videos to post")
@@ -274,21 +276,23 @@ async def post_to_main_channel():
         
         for video in videos:
             try:
+                queue_id = str(video['_id'])
+                
                 # Create message text
-                text = f"""🎬 **{video.title}**
+                text = f"""🎬 **{video['title']}**
 
-{video.description or ''}
+{video.get('description') or ''}
 
 🔗 **Watch Online:**
-{video.lulustream_url}
+{video['lulustream_url']}
 
 📥 **Download:**
-{video.lulustream_url.replace('//', '//d.')}"""
+{video['lulustream_url'].replace('//', '//d.')}"""
                 
                 # Create inline keyboard
                 keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("▶️ Watch Online", url=video.lulustream_url)],
-                    [InlineKeyboardButton("📥 Download", url=video.lulustream_url.replace('//', '//d.'))]
+                    [InlineKeyboardButton("▶️ Watch Online", url=video['lulustream_url'])],
+                    [InlineKeyboardButton("📥 Download", url=video['lulustream_url'].replace('//', '//d.'))]
                 ])
                 
                 # Send to main channel
@@ -299,16 +303,16 @@ async def post_to_main_channel():
                 )
                 
                 # Update status
-                database.update_upload_status(video.id, 'posted')
+                await database.update_upload_status(queue_id, 'posted')
                 posted_count += 1
                 
-                print(f"[SCHEDULER] Posted: {video.title}")
+                print(f"[SCHEDULER] Posted: {video['title']}")
                 
                 # Small delay between posts
                 await asyncio.sleep(2)
                 
             except Exception as e:
-                print(f"[SCHEDULER] Error posting video {video.id}: {e}")
+                print(f"[SCHEDULER] Error posting video {queue_id}: {e}")
         
         print(f"[SCHEDULER] ✅ Posted {posted_count} videos")
         
@@ -377,7 +381,7 @@ async def callback_handler(client, callback_query):
     data = callback_query.data
     
     if data == "stats":
-        stats = database.get_queue_stats()
+        stats = await database.get_queue_stats()
         text = f"""📊 **Queue Statistics**
 
 📦 Total: {stats['total']}
@@ -409,9 +413,21 @@ async def callback_handler(client, callback_query):
 if __name__ == "__main__":
     print("🚀 Starting LuluStream Bot...")
     
-    # Initialize database
-    database.init_db()
+    # Initialize bot with async context
+    async def main():
+        # Connect to MongoDB
+        await database.connect_db()
+        
+        # Start bot
+        await bot.start()
+        print("✅ Bot is running!")
+        
+        # Keep bot running
+        await asyncio.Event().wait()
     
-    # Start bot
-    print("✅ Bot is running!")
-    bot.run()
+    # Run bot
+    import asyncio
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped by user")
