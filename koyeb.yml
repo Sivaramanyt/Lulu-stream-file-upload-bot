@@ -1,0 +1,63 @@
+# Koyeb Deployment Configuration
+app:
+  name: lulustream-bot
+  
+services:
+  - name: bot-worker
+    type: worker
+    
+    # Instance configuration
+    instance:
+      type: nano  # Free tier
+      
+    # Build configuration
+    build:
+      dockerfile: Dockerfile
+      
+    # Environment variables (set in Koyeb dashboard)
+    env:
+      - name: API_ID
+        secret: API_ID
+      - name: API_HASH
+        secret: API_HASH
+      - name: BOT_TOKEN
+        secret: BOT_TOKEN
+      - name: STORAGE_CHANNEL_ID
+        secret: STORAGE_CHANNEL_ID
+      - name: MAIN_CHANNEL_ID
+        secret: MAIN_CHANNEL_ID
+      - name: ADMIN_ID
+        secret: ADMIN_ID
+      - name: LULUSTREAM_API_KEY
+        secret: LULUSTREAM_API_KEY
+      - name: FOLDER_ID
+        value: "25"
+      - name: CATEGORY_ID
+        value: "5"
+      - name: DEFAULT_TAGS
+        value: "Promo, High quality"
+      - name: FILE_PUBLIC
+        value: "1"
+      - name: FILE_ADULT
+        value: "1"
+      - name: VIDEOS_PER_BATCH
+        value: "10"
+      - name: POST_INTERVAL_MINUTES
+        value: "60"
+      - name: DATABASE_URL
+        value: "sqlite:///lulustream_bot.db"
+      - name: LOG_LEVEL
+        value: "INFO"
+        
+    # Health check disabled for worker
+    health_check:
+      enabled: false
+      
+    # Scaling
+    scaling:
+      min: 1
+      max: 1
+      
+    # Regions
+    regions:
+      - fra  # Frankfurt (closest to India with good speed)
