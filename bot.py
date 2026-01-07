@@ -312,14 +312,34 @@ async def upload_worker():
                 filecode = result['filecode']
                 url = result['url']
                 
+                # Get file info from LuluStream to get original title and thumbnail
+                file_info = lulu_client.get_file_info(filecode)
+                
+                original_title = None
+                thumbnail_url = None
+                
+                if file_info and file_info.get('status') == 200:
+                    result_data = file_info.get('result', {})
+                    if isinstance(result_data, list) and len(result_data) > 0:
+                        result_data = result_data[0]
+                    
+                    original_title = result_data.get('file_title') or result_data.get('title')
+                    thumbnail_url = result_data.get('splash_img') or result_data.get('thumbnail')
+                    
+                    logger.info(f"[WORKER] Original title: {original_title}")
+                    logger.info(f"[WORKER] Thumbnail: {thumbnail_url}")
+                
+                # Update database with all info
                 await database.update_upload_status(
                     queue_id,
                     'uploaded',
                     lulustream_file_code=filecode,
-                    lulustream_url=url
+                    lulustream_url=url,
+                    original_title=original_title,
+                    thumbnail_url=thumbnail_url
                 )
                 
-                logger.info(f"[WORKER] ✅ Uploaded: {item['title']}")
+                logger.info(f"[WORKER] ✅ Uploaded: {original_title or item['title']}")
                 logger.info(f"[WORKER] URL: {url}")
             else:
                 error_msg = result.get('error', 'Unknown error') if result else 'Upload failed'
@@ -360,36 +380,57 @@ async def post_to_main_channel(batch_size=None):
             try:
                 queue_id = str(video['_id'])
                 
-                # Create message text
-                text = f"""🎬 {video['title']}
+                # Use original title from LuluStream if available, else use upload title
+                title = video.get('original_title') or video['title']
+                
+                # Create message text - only watch link, no download
+                text = f"""🎬 {title}
 
 {video.get('description') or ''}
 
-🔗 Watch Online:
-{video['lulustream_url']}
-
-📥 Download:
-{video['lulustream_url'].replace('//', '//d.')}"""
+▶️ Watch Now"""
                 
-                # Create inline keyboard
+                # Create inline keyboard - only Watch button
                 keyboard = [
-                    [InlineKeyboardButton("▶️ Watch Online", url=video['lulustream_url'])],
-                    [InlineKeyboardButton("📥 Download", url=video['lulustream_url'].replace('//', '//d.'))]
+                    [InlineKeyboardButton("▶️ Watch Now", url=video['lulustream_url'])]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
-                # Send to main channel
-                await bot_app.bot.send_message(
-                    chat_id=config.MAIN_CHANNEL_ID,
-                    text=text,
-                    reply_markup=reply_markup
-                )
+                # Get thumbnail URL
+                thumbnail_url = video.get('thumbnail_url')
+                
+                # Send to main channel with thumbnail if available
+                if thumbnail_url:
+                    try:
+                        # Send as photo with caption
+                        await bot_app.bot.send_photo(
+                            chat_id=config.MAIN_CHANNEL_ID,
+                            photo=thumbnail_url,
+                            caption=text,
+                            reply_markup=reply_markup
+                        )
+                        logger.info(f"[SCHEDULER] Posted with thumbnail: {title}")
+                    except Exception as e:
+                        logger.warning(f"[SCHEDULER] Failed to send thumbnail, sending text: {e}")
+                        # Fallback to text message if thumbnail fails
+                        await bot_app.bot.send_message(
+                            chat_id=config.MAIN_CHANNEL_ID,
+                            text=text,
+                            reply_markup=reply_markup
+                        )
+                        logger.info(f"[SCHEDULER] Posted without thumbnail: {title}")
+                else:
+                    # No thumbnail, send as text message
+                    await bot_app.bot.send_message(
+                        chat_id=config.MAIN_CHANNEL_ID,
+                        text=text,
+                        reply_markup=reply_markup
+                    )
+                    logger.info(f"[SCHEDULER] Posted without thumbnail: {title}")
                 
                 # Update status
                 await database.update_upload_status(queue_id, 'posted')
                 posted_count += 1
-                
-                logger.info(f"[SCHEDULER] Posted: {video['title']}")
                 
                 # Small delay between posts
                 await asyncio.sleep(2)
