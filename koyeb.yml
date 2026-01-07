@@ -1,4 +1,4 @@
-# Koyeb Deployment Configuration
+# Koyeb Deployment Configuration for Worker Bot
 app:
   name: lulustream-bot
   
@@ -51,14 +51,8 @@ services:
       - name: LOG_LEVEL
         value: "INFO"
         
-    # IMPORTANT: Health check MUST be disabled for worker bots
-    health_checks:
-      - http:
-          port: 8000
-          path: /health
-        grace_period: 60
-        interval: 60
-        restart_limit: 3
+    # NO health checks for worker service
+    # Health checks are only for web services with HTTP endpoints
         
     # Scaling
     scaling:
@@ -67,4 +61,4 @@ services:
       
     # Regions
     regions:
-      - fra  # Frankfurt
+      - fra  # Frankfurt (best for India)
