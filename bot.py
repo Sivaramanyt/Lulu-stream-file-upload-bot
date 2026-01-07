@@ -132,7 +132,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_storage_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle video files sent to storage channel"""
     try:
-        message = update.message
+        # Get message (works for both messages and channel posts)
+        message = update.message or update.channel_post
+        if not message:
+            return
         
         # Get file info
         if message.video:
@@ -181,12 +184,18 @@ async def handle_storage_file(update: Update, context: ContextTypes.DEFAULT_TYPE
             
     except Exception as e:
         logger.error(f"[ERROR] Handle storage file: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+        if message:
+            await message.reply_text(f"❌ Error: {e}")
 
 async def handle_storage_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle direct download links sent to storage channel"""
     try:
-        text = update.message.text.strip()
+        # Get message (works for both messages and channel posts)
+        message = update.message or update.channel_post
+        if not message or not message.text:
+            return
+        
+        text = message.text.strip()
         
         # Check if it's a URL
         if not (text.startswith('http://') or text.startswith('https://')):
@@ -195,12 +204,12 @@ async def handle_storage_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Extract info from message
         lines = text.split('\n')
         video_url = lines[0]
-        title = lines[1] if len(lines) > 1 else f"Video_{update.message.message_id}"
+        title = lines[1] if len(lines) > 1 else f"Video_{message.message_id}"
         description = '\n'.join(lines[2:]) if len(lines) > 2 else None
         
         # Add to queue
         queue_id = await database.add_to_queue(
-            message_id=update.message.message_id,
+            message_id=message.message_id,
             file_name=title,
             file_url=video_url,
             title=title,
@@ -208,7 +217,7 @@ async def handle_storage_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         
         if queue_id:
-            await update.message.reply_text(
+            await message.reply_text(
                 f"✅ URL added to queue!\n\n"
                 f"🔗 URL: {video_url}\n"
                 f"📝 Title: {title}\n"
@@ -216,11 +225,12 @@ async def handle_storage_link(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             logger.info(f"[QUEUE] Added URL: {title} (ID: {queue_id})")
         else:
-            await update.message.reply_text("❌ Failed to add URL to queue!")
+            await message.reply_text("❌ Failed to add URL to queue!")
             
     except Exception as e:
         logger.error(f"[ERROR] Handle storage link: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+        if message:
+            await message.reply_text(f"❌ Error: {e}")
 
 # ==================== UPLOAD WORKER ====================
 
@@ -507,13 +517,15 @@ async def main():
     bot_app.add_handler(CommandHandler("start_scheduler", start_scheduler_command))
     bot_app.add_handler(CommandHandler("stop_scheduler", stop_scheduler_command))
     
-    # Storage channel handlers
+    # Storage channel handlers (handles both messages and channel posts)
     bot_app.add_handler(MessageHandler(
-        filters.Chat(config.STORAGE_CHANNEL_ID) & (filters.VIDEO | filters.Document.ALL),
+        (filters.Chat(config.STORAGE_CHANNEL_ID) | filters.Chat(username=f"@{config.STORAGE_CHANNEL_ID}")) & 
+        (filters.VIDEO | filters.Document.ALL),
         handle_storage_file
     ))
     bot_app.add_handler(MessageHandler(
-        filters.Chat(config.STORAGE_CHANNEL_ID) & filters.TEXT & ~filters.COMMAND,
+        (filters.Chat(config.STORAGE_CHANNEL_ID) | filters.Chat(username=f"@{config.STORAGE_CHANNEL_ID}")) & 
+        filters.TEXT & ~filters.COMMAND,
         handle_storage_link
     ))
     
