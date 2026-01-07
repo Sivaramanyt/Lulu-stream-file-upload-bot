@@ -1,10 +1,10 @@
-# Koyeb Deployment Configuration for Worker Bot
+# Koyeb Deployment Configuration for Web Service (Free Tier)
 app:
   name: lulustream-bot
   
 services:
-  - name: bot-worker
-    type: worker
+  - name: bot-web
+    type: web  # Web service for free tier
     
     # Instance configuration
     instance:
@@ -14,6 +14,11 @@ services:
     build:
       dockerfile: Dockerfile
       
+    # Ports
+    ports:
+      - port: 8000
+        protocol: http
+        
     # Environment variables (set in Koyeb dashboard)
     env:
       - name: API_ID
@@ -51,8 +56,14 @@ services:
       - name: LOG_LEVEL
         value: "INFO"
         
-    # NO health checks for worker service
-    # Health checks are only for web services with HTTP endpoints
+    # Health checks for web service
+    health_checks:
+      - http:
+          port: 8000
+          path: /health
+        grace_period: 60
+        interval: 60
+        restart_limit: 3
         
     # Scaling
     scaling:
