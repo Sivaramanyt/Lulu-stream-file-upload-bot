@@ -1,7 +1,0 @@
-[build]
-builder = "heroku/buildpacks:20"
-
-[deploy]
-startCommand = "python bot.py"
-restartPolicyType = "on-failure"
-restartPolicyMaxRetries = 10
