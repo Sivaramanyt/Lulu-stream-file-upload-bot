@@ -8,6 +8,8 @@ import tempfile
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
+from aiohttp import web
+import threading
 
 # Initialize bot
 bot = Client(
@@ -23,6 +25,50 @@ lulu_client = LuluStreamClient()
 
 # Upload worker flag
 upload_worker_running = False
+
+# ==================== WEB SERVER FOR KOYEB HEALTH CHECKS ====================
+async def health_check(request):
+    """Health check endpoint for Koyeb"""
+    return web.Response(text='OK', status=200)
+
+async def status_page(request):
+    """Status page"""
+    stats = await database.get_queue_stats()
+    html = f"""
+    <html>
+    <head><title>LuluStream Bot Status</title></head>
+    <body style="font-family: Arial; padding: 20px;">
+        <h1>🎬 LuluStream Bot</h1>
+        <h2>✅ Bot is Running!</h2>
+        <hr>
+        <h3>📊 Queue Statistics:</h3>
+        <ul>
+            <li>📦 Total: {stats['total']}</li>
+            <li>⏳ Pending: {stats['pending']}</li>
+            <li>⬆️ Uploading: {stats['uploading']}</li>
+            <li>✅ Uploaded: {stats['uploaded']}</li>
+            <li>📤 Posted: {stats['posted']}</li>
+            <li>❌ Failed: {stats['failed']}</li>
+        </ul>
+        <hr>
+        <p>🤖 Worker: {'Running' if upload_worker_running else 'Stopped'}</p>
+        <p>📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}</p>
+    </body>
+    </html>
+    """
+    return web.Response(text=html, content_type='text/html')
+
+async def start_web_server():
+    """Start web server for health checks"""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/', status_page)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    await site.start()
+    print("✅ Web server started on port 8000 for health checks")
 
 # ==================== START COMMAND ====================
 @bot.on_message(filters.command("start") & filters.private)
@@ -418,9 +464,13 @@ if __name__ == "__main__":
         # Connect to MongoDB
         await database.connect_db()
         
+        # Start web server for Koyeb health checks
+        await start_web_server()
+        
         # Start bot
         await bot.start()
         print("✅ Bot is running!")
+        print("🌐 Web server: http://0.0.0.0:8000")
         
         # Keep bot running
         await asyncio.Event().wait()
