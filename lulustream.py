@@ -3,7 +3,6 @@ import config
 import os
 import tempfile
 from typing import Optional, Dict
-from urllib.parse import urlparse
 
 class LuluStreamClient:
     """Client for LuluStream API"""
@@ -33,39 +32,6 @@ class LuluStreamClient:
         except Exception as e:
             print(f"[ERROR] Get upload server error: {e}")
             return None
-    
-    def is_direct_video_url(self, url: str) -> bool:
-        """Check if URL is a direct video link"""
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-        
-        # List of video file extensions
-        video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg']
-        
-        return any(path.endswith(ext) for ext in video_extensions)
-    
-    def download_file(self, url: str, output_path: str) -> bool:
-        """Download file from URL"""
-        try:
-            print(f"[LULUSTREAM] Downloading from: {url}")
-            
-            response = requests.get(url, stream=True, timeout=300)
-            if response.status_code == 200:
-                with open(output_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                file_size = os.path.getsize(output_path)
-                print(f"[LULUSTREAM] Downloaded: {file_size / (1024*1024):.2f} MB")
-                return True
-            else:
-                print(f"[ERROR] Download failed: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"[ERROR] Download error: {e}")
-            return False
     
     def upload_file(self, file_path: str, title: str = None, description: str = None, 
                    tags: str = None, snapshot_path: str = None) -> Optional[Dict]:
@@ -158,58 +124,30 @@ class LuluStreamClient:
     def upload_by_url(self, video_url: str, title: str = None, description: str = None,
                      tags: str = None) -> Optional[Dict]:
         """
-        Upload video by URL
-        
-        If URL is not a direct video link, downloads it first then uploads the file.
+        Upload video by URL - Direct to LuluStream API
+        POST https://lulustream.com/api/upload/url
         
         Returns:
-            {"filecode": "xxx", "status": "OK"} on success
+            {"filecode": "xxx", "status": 200} on success
         """
         try:
-            # Check if it's a direct video URL
-            if not self.is_direct_video_url(video_url):
-                print(f"[LULUSTREAM] Not a direct video URL, downloading first...")
-                
-                # Create temp file
-                temp_dir = tempfile.mkdtemp()
-                temp_file = os.path.join(temp_dir, f"{title or 'video'}.mp4")
-                
-                try:
-                    # Download file
-                    if self.download_file(video_url, temp_file):
-                        # Upload the downloaded file
-                        result = self.upload_file(
-                            file_path=temp_file,
-                            title=title,
-                            description=description,
-                            tags=tags
-                        )
-                        return result
-                    else:
-                        return {
-                            'success': False,
-                            'error': 'Failed to download video from URL'
-                        }
-                finally:
-                    # Clean up temp file
-                    try:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                        os.rmdir(temp_dir)
-                    except:
-                        pass
+            # Build URL with API key as query parameter
+            url = f"{self.api_base}/upload/url"
             
-            # Direct video URL - use LuluStream's upload/url endpoint
-            url = f"{self.api_base}/upload/url?key={self.api_key}"
-            
-            # Prepare POST data (without key, as it's in URL)
+            # Prepare POST data with all parameters
             data = {
+                'key': self.api_key,
                 'url': video_url,
-                'fld_id': config.FOLDER_ID,
-                'cat_id': config.CATEGORY_ID,
-                'file_public': config.FILE_PUBLIC,
-                'file_adult': config.FILE_ADULT,
             }
+            
+            # Add optional parameters (use defaults if not provided)
+            if config.FOLDER_ID:
+                data['fld_id'] = config.FOLDER_ID
+            if config.CATEGORY_ID:
+                data['cat_id'] = config.CATEGORY_ID
+            
+            data['file_public'] = config.FILE_PUBLIC if hasattr(config, 'FILE_PUBLIC') else '1'
+            data['file_adult'] = config.FILE_ADULT if hasattr(config, 'FILE_ADULT') else '0'
             
             if title:
                 data['file_title'] = title
@@ -217,37 +155,90 @@ class LuluStreamClient:
                 data['file_descr'] = description
             if tags:
                 data['tags'] = tags
-            else:
+            elif hasattr(config, 'DEFAULT_TAGS'):
                 data['tags'] = config.DEFAULT_TAGS
             
-            print(f"[LULUSTREAM] Uploading direct URL: {video_url}")
+            print(f"[LULUSTREAM] === URL UPLOAD REQUEST ===")
+            print(f"[LULUSTREAM] URL: {video_url}")
+            print(f"[LULUSTREAM] Title: {title}")
+            print(f"[LULUSTREAM] API Endpoint: {url}")
+            print(f"[LULUSTREAM] API Key: {self.api_key[:12]}...")
+            print(f"[LULUSTREAM] Folder ID: {config.FOLDER_ID if hasattr(config, 'FOLDER_ID') else 'None'}")
+            print(f"[LULUSTREAM] Data: {data}")
             
-            response = requests.post(url, data=data, timeout=60)
+            # Make request with headers similar to browser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            }
             
-            print(f"[LULUSTREAM] Response status: {response.status_code}")
-            print(f"[LULUSTREAM] Response: {response.text}")
+            response = requests.post(url, data=data, headers=headers, timeout=120)
+            
+            print(f"[LULUSTREAM] === URL UPLOAD RESPONSE ===")
+            print(f"[LULUSTREAM] Status Code: {response.status_code}")
+            print(f"[LULUSTREAM] Response Headers: {dict(response.headers)}")
+            print(f"[LULUSTREAM] Response Body: {response.text}")
             
             if response.status_code == 200:
-                result = response.json()
-                if result.get('status') == 200 and result.get('result'):
-                    filecode = result['result'].get('filecode')
-                    if filecode:
+                try:
+                    result = response.json()
+                    print(f"[LULUSTREAM] Parsed JSON: {result}")
+                    
+                    # Check various response formats
+                    if result.get('status') == 200:
+                        # Response format 1: {"status": 200, "result": {"filecode": "xxx"}}
+                        if result.get('result'):
+                            filecode = result['result'].get('filecode')
+                            if filecode:
+                                print(f"[LULUSTREAM] ✅ SUCCESS - Filecode: {filecode}")
+                                return {
+                                    'success': True,
+                                    'filecode': filecode,
+                                    'url': f"https://luluvid.com/{filecode}"
+                                }
+                    
+                    # Response format 2: {"msg": "OK", "result": {"filecode": "xxx"}}
+                    elif result.get('msg') == 'OK' and result.get('result'):
+                        filecode = result['result'].get('filecode')
+                        if filecode:
+                            print(f"[LULUSTREAM] ✅ SUCCESS - Filecode: {filecode}")
+                            return {
+                                'success': True,
+                                'filecode': filecode,
+                                'url': f"https://luluvid.com/{filecode}"
+                            }
+                    
+                    # Check if there's an error message
+                    error_msg = result.get('msg') or result.get('error') or result.get('message')
+                    if error_msg:
+                        print(f"[LULUSTREAM] ❌ API Error: {error_msg}")
                         return {
-                            'success': True,
-                            'filecode': filecode,
-                            'url': f"https://luluvid.com/{filecode}"
+                            'success': False,
+                            'error': f"LuluStream API error: {error_msg}"
                         }
+                    
+                except ValueError as e:
+                    print(f"[LULUSTREAM] ❌ JSON Parse Error: {e}")
+                    pass
+            
+            # If we got here, something went wrong
+            error_text = response.text[:500] if len(response.text) > 500 else response.text
+            print(f"[LULUSTREAM] ❌ Upload failed: {error_text}")
             
             return {
                 'success': False,
-                'error': f"URL upload failed: {response.text[:200]}"
+                'error': f"URL upload failed (Status {response.status_code}): {error_text}"
             }
             
         except Exception as e:
-            print(f"[ERROR] LuluStream URL upload error: {e}")
+            print(f"[LULUSTREAM] ❌ EXCEPTION: {e}")
+            import traceback
+            print(f"[LULUSTREAM] Traceback: {traceback.format_exc()}")
             return {
                 'success': False,
-                'error': str(e)
+                'error': f"Exception: {str(e)}"
             }
     
     def get_file_info(self, filecode: str) -> Optional[Dict]:
