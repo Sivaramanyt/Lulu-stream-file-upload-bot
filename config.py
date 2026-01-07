@@ -47,8 +47,9 @@ VIDEOS_PER_BATCH = int(getenv("VIDEOS_PER_BATCH", "10"))
 # Interval between batches (in minutes)
 POST_INTERVAL_MINUTES = int(getenv("POST_INTERVAL_MINUTES", "60"))
 
-# ==================== DATABASE ====================
-DATABASE_URL = getenv("DATABASE_URL", "sqlite:///lulustream_bot.db")
+# ==================== MONGODB DATABASE ====================
+MONGO_URI = getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB = getenv("MONGO_DB", "lulustream_bot")
 
 # ==================== LOGGING ====================
 LOG_LEVEL = getenv("LOG_LEVEL", "INFO")
