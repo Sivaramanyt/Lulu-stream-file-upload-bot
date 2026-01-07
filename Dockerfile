@@ -18,11 +18,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY . .
 
-# Create directory for database
-RUN mkdir -p /app/data
-
-# Set environment variable for database location
-ENV DATABASE_URL=sqlite:////app/data/lulustream_bot.db
-
 # Run the bot
 CMD ["python", "bot.py"]
