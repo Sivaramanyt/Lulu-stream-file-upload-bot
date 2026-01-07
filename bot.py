@@ -76,27 +76,27 @@ async def start_web_server():
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
-    text = """🎬 *LuluStream Auto Upload Bot*
+    text = """🎬 LuluStream Auto Upload Bot
 
-*Features:*
+Features:
 ✅ Auto upload to LuluStream
 ✅ Scheduled posting to main channel
 ✅ Supports video files & direct links
 ✅ Bulk upload support
 ✅ MongoDB database (persistent)
 
-*How to use:*
-1\. Forward videos to storage channel
-2\. Bot uploads to LuluStream
-3\. Posts 10 videos per hour to main channel
+How to use:
+1. Forward videos to storage channel
+2. Bot uploads to LuluStream
+3. Posts 10 videos per hour to main channel
 
-*Commands:*
-/stats \- Queue statistics
-/start\\_worker \- Start upload worker
-/stop\\_worker \- Stop upload worker
-/start\\_scheduler \- Start auto posting
-/stop\\_scheduler \- Stop auto posting
-/post\\_now \- Post videos immediately"""
+Commands:
+/stats - Queue statistics
+/start_worker - Start upload worker
+/stop_worker - Stop upload worker
+/start_scheduler - Start auto posting
+/stop_scheduler - Stop auto posting
+/post_now - Post videos immediately"""
     
     keyboard = [
         [InlineKeyboardButton("📊 Statistics", callback_data="stats")],
@@ -105,22 +105,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='MarkdownV2')
+    await update.message.reply_text(text, reply_markup=reply_markup)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stats command handler"""
     if update.effective_user.id != config.ADMIN_ID:
         await update.message.reply_text(
             f"❌ You are not authorized!\n\n"
-            f"Your ID: `{update.effective_user.id}`\n"
-            f"Admin ID: `{config.ADMIN_ID}`",
-            parse_mode='Markdown'
+            f"Your ID: {update.effective_user.id}\n"
+            f"Admin ID: {config.ADMIN_ID}"
         )
         return
     
     stats = await database.get_queue_stats()
     
-    text = f"""📊 *Queue Statistics*
+    text = f"""📊 Queue Statistics
 
 📦 Total: {stats['total']}
 ⏳ Pending: {stats['pending']}
@@ -132,9 +131,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 Worker: {'Running' if upload_worker_running else 'Stopped'}
 📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}
 
-👤 Your ID: `{update.effective_user.id}`"""
+👤 Your ID: {update.effective_user.id}"""
     
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text)
 
 # ==================== HANDLE FILES FROM STORAGE CHANNEL ====================
 
@@ -362,14 +361,14 @@ async def post_to_main_channel(batch_size=None):
                 queue_id = str(video['_id'])
                 
                 # Create message text
-                text = f"""🎬 *{video['title']}*
+                text = f"""🎬 {video['title']}
 
 {video.get('description') or ''}
 
-🔗 *Watch Online:*
+🔗 Watch Online:
 {video['lulustream_url']}
 
-📥 *Download:*
+📥 Download:
 {video['lulustream_url'].replace('//', '//d.')}"""
                 
                 # Create inline keyboard
@@ -383,8 +382,7 @@ async def post_to_main_channel(batch_size=None):
                 await bot_app.bot.send_message(
                     chat_id=config.MAIN_CHANNEL_ID,
                     text=text,
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
+                    reply_markup=reply_markup
                 )
                 
                 # Update status
@@ -415,9 +413,8 @@ async def start_worker_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.effective_user.id != config.ADMIN_ID:
         await update.message.reply_text(
             f"❌ Not authorized!\n\n"
-            f"Your ID: `{update.effective_user.id}`\n"
-            f"Admin ID: `{config.ADMIN_ID}`",
-            parse_mode='Markdown'
+            f"Your ID: {update.effective_user.id}\n"
+            f"Admin ID: {config.ADMIN_ID}"
         )
         return
     
@@ -436,9 +433,8 @@ async def stop_worker_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_user.id != config.ADMIN_ID:
         await update.message.reply_text(
             f"❌ Not authorized!\n\n"
-            f"Your ID: `{update.effective_user.id}`\n"
-            f"Admin ID: `{config.ADMIN_ID}`",
-            parse_mode='Markdown'
+            f"Your ID: {update.effective_user.id}\n"
+            f"Admin ID: {config.ADMIN_ID}"
         )
         return
     
@@ -455,9 +451,8 @@ async def start_scheduler_command(update: Update, context: ContextTypes.DEFAULT_
     if update.effective_user.id != config.ADMIN_ID:
         await update.message.reply_text(
             f"❌ Not authorized!\n\n"
-            f"Your ID: `{update.effective_user.id}`\n"
-            f"Admin ID: `{config.ADMIN_ID}`",
-            parse_mode='Markdown'
+            f"Your ID: {update.effective_user.id}\n"
+            f"Admin ID: {config.ADMIN_ID}"
         )
         return
     
@@ -488,9 +483,8 @@ async def stop_scheduler_command(update: Update, context: ContextTypes.DEFAULT_T
     if update.effective_user.id != config.ADMIN_ID:
         await update.message.reply_text(
             f"❌ Not authorized!\n\n"
-            f"Your ID: `{update.effective_user.id}`\n"
-            f"Admin ID: `{config.ADMIN_ID}`",
-            parse_mode='Markdown'
+            f"Your ID: {update.effective_user.id}\n"
+            f"Admin ID: {config.ADMIN_ID}"
         )
         return
     
@@ -507,9 +501,8 @@ async def post_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != config.ADMIN_ID:
         await update.message.reply_text(
             f"❌ Not authorized!\n\n"
-            f"Your ID: `{update.effective_user.id}`\n"
-            f"Admin ID: `{config.ADMIN_ID}`",
-            parse_mode='Markdown'
+            f"Your ID: {update.effective_user.id}\n"
+            f"Admin ID: {config.ADMIN_ID}"
         )
         return
     
@@ -556,7 +549,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "stats":
         stats = await database.get_queue_stats()
-        text = f"""📊 *Queue Statistics*
+        text = f"""📊 Queue Statistics
 
 📦 Total: {stats['total']}
 ⏳ Pending: {stats['pending']}
@@ -568,7 +561,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 Worker: {'Running' if upload_worker_running else 'Stopped'}
 📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}"""
         
-        await query.edit_message_text(text, parse_mode='Markdown')
+        await query.edit_message_text(text)
     
     elif query.data == "start_worker":
         if not upload_worker_running:
