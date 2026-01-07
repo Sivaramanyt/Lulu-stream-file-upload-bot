@@ -3,6 +3,7 @@ import config
 import os
 import tempfile
 from typing import Optional, Dict
+from urllib.parse import urlparse
 
 class LuluStreamClient:
     """Client for LuluStream API"""
@@ -32,6 +33,39 @@ class LuluStreamClient:
         except Exception as e:
             print(f"[ERROR] Get upload server error: {e}")
             return None
+    
+    def is_direct_video_url(self, url: str) -> bool:
+        """Check if URL is a direct video link"""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        
+        # List of video file extensions
+        video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg']
+        
+        return any(path.endswith(ext) for ext in video_extensions)
+    
+    def download_file(self, url: str, output_path: str) -> bool:
+        """Download file from URL"""
+        try:
+            print(f"[LULUSTREAM] Downloading from: {url}")
+            
+            response = requests.get(url, stream=True, timeout=300)
+            if response.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                file_size = os.path.getsize(output_path)
+                print(f"[LULUSTREAM] Downloaded: {file_size / (1024*1024):.2f} MB")
+                return True
+            else:
+                print(f"[ERROR] Download failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"[ERROR] Download error: {e}")
+            return False
     
     def upload_file(self, file_path: str, title: str = None, description: str = None, 
                    tags: str = None, snapshot_path: str = None) -> Optional[Dict]:
@@ -125,13 +159,47 @@ class LuluStreamClient:
                      tags: str = None) -> Optional[Dict]:
         """
         Upload video by URL
-        POST https://lulustream.com/api/upload/url?key={api_key}
+        
+        If URL is not a direct video link, downloads it first then uploads the file.
         
         Returns:
             {"filecode": "xxx", "status": "OK"} on success
         """
         try:
-            # Build URL with API key as query parameter
+            # Check if it's a direct video URL
+            if not self.is_direct_video_url(video_url):
+                print(f"[LULUSTREAM] Not a direct video URL, downloading first...")
+                
+                # Create temp file
+                temp_dir = tempfile.mkdtemp()
+                temp_file = os.path.join(temp_dir, f"{title or 'video'}.mp4")
+                
+                try:
+                    # Download file
+                    if self.download_file(video_url, temp_file):
+                        # Upload the downloaded file
+                        result = self.upload_file(
+                            file_path=temp_file,
+                            title=title,
+                            description=description,
+                            tags=tags
+                        )
+                        return result
+                    else:
+                        return {
+                            'success': False,
+                            'error': 'Failed to download video from URL'
+                        }
+                finally:
+                    # Clean up temp file
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                        os.rmdir(temp_dir)
+                    except:
+                        pass
+            
+            # Direct video URL - use LuluStream's upload/url endpoint
             url = f"{self.api_base}/upload/url?key={self.api_key}"
             
             # Prepare POST data (without key, as it's in URL)
@@ -152,8 +220,7 @@ class LuluStreamClient:
             else:
                 data['tags'] = config.DEFAULT_TAGS
             
-            print(f"[LULUSTREAM] Uploading by URL: {video_url}")
-            print(f"[LULUSTREAM] API Key: {self.api_key[:8]}...")
+            print(f"[LULUSTREAM] Uploading direct URL: {video_url}")
             
             response = requests.post(url, data=data, timeout=60)
             
