@@ -131,10 +131,11 @@ class LuluStreamClient:
             {"filecode": "xxx", "status": "OK"} on success
         """
         try:
-            url = f"{self.api_base}/upload/url"
+            # Build URL with API key as query parameter
+            url = f"{self.api_base}/upload/url?key={self.api_key}"
             
+            # Prepare POST data (without key, as it's in URL)
             data = {
-                'key': self.api_key,
                 'url': video_url,
                 'fld_id': config.FOLDER_ID,
                 'cat_id': config.CATEGORY_ID,
@@ -152,15 +153,17 @@ class LuluStreamClient:
                 data['tags'] = config.DEFAULT_TAGS
             
             print(f"[LULUSTREAM] Uploading by URL: {video_url}")
+            print(f"[LULUSTREAM] API Key: {self.api_key[:8]}...")
             
             response = requests.post(url, data=data, timeout=60)
             
+            print(f"[LULUSTREAM] Response status: {response.status_code}")
             print(f"[LULUSTREAM] Response: {response.text}")
             
             if response.status_code == 200:
-                data = response.json()
-                if data.get('status') == 200 and data.get('result'):
-                    filecode = data['result'].get('filecode')
+                result = response.json()
+                if result.get('status') == 200 and result.get('result'):
+                    filecode = result['result'].get('filecode')
                     if filecode:
                         return {
                             'success': True,
