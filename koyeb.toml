@@ -1,0 +1,23 @@
+[app]
+name = "lulustream-bot"
+
+[services.bot]
+type = "worker"
+
+[services.bot.instance]
+type = "nano"
+
+[services.bot.build]
+type = "buildpack"
+
+[services.bot.health_checks]
+enabled = false
+
+[services.bot.env]
+API_ID = { secret = "API_ID" }
+API_HASH = { secret = "API_HASH" }
+BOT_TOKEN = { secret = "BOT_TOKEN" }
+STORAGE_CHANNEL_ID = { secret = "STORAGE_CHANNEL_ID" }
+MAIN_CHANNEL_ID = { secret = "MAIN_CHANNEL_ID" }
+ADMIN_ID = { secret = "ADMIN_ID" }
+LULUSTREAM_API_KEY = { secret = "LULUSTREAM_API_KEY" }
