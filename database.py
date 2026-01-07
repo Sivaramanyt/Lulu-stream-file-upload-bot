@@ -67,6 +67,8 @@ async def add_to_queue(
             "status": "pending",
             "lulustream_file_code": None,
             "lulustream_url": None,
+            "original_title": None,  # Will be filled after upload from LuluStream
+            "thumbnail_url": None,   # Will be filled after upload from LuluStream
             "added_at": datetime.utcnow(),
             "uploaded_at": None,
             "posted_at": None,
@@ -113,6 +115,8 @@ async def update_upload_status(
     status: str,
     lulustream_file_code: Optional[str] = None,
     lulustream_url: Optional[str] = None,
+    original_title: Optional[str] = None,
+    thumbnail_url: Optional[str] = None,
     error_message: Optional[str] = None
 ) -> bool:
     """Update upload status"""
@@ -128,6 +132,12 @@ async def update_upload_status(
         
         if lulustream_url:
             update_data["lulustream_url"] = lulustream_url
+        
+        if original_title:
+            update_data["original_title"] = original_title
+        
+        if thumbnail_url:
+            update_data["thumbnail_url"] = thumbnail_url
         
         if error_message:
             update_data["error_message"] = error_message
