@@ -95,7 +95,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start_worker - Start upload worker
 /stop_worker - Stop upload worker
 /start_scheduler - Start auto posting
-/stop_scheduler - Stop auto posting"""
+/stop_scheduler - Stop auto posting
+/post_now - Post videos immediately"""
     
     keyboard = [
         [InlineKeyboardButton("📊 Statistics", callback_data="stats")],
@@ -109,6 +110,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stats command handler"""
     if update.effective_user.id != config.ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized!")
         return
     
     stats = await database.get_queue_stats()
@@ -123,7 +125,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ❌ Failed: {stats['failed']}
 
 🤖 Worker: {'Running' if upload_worker_running else 'Stopped'}
-📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}"""
+📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}
+
+👤 Your ID: `{update.effective_user.id}`"""
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -331,17 +335,20 @@ async def upload_worker():
 
 # ==================== POST SCHEDULER ====================
 
-async def post_to_main_channel():
+async def post_to_main_channel(batch_size=None):
     """Post uploaded videos to main channel"""
     try:
-        logger.info("[SCHEDULER] Posting batch to main channel...")
+        if batch_size is None:
+            batch_size = config.VIDEOS_PER_BATCH
+            
+        logger.info(f"[SCHEDULER] Posting batch of {batch_size} to main channel...")
         
         # Get uploaded videos that haven't been posted
-        videos = await database.get_uploaded_not_posted(limit=config.VIDEOS_PER_BATCH)
+        videos = await database.get_uploaded_not_posted(limit=batch_size)
         
         if not videos:
             logger.info("[SCHEDULER] No videos to post")
-            return
+            return 0
         
         posted_count = 0
         
@@ -388,9 +395,11 @@ async def post_to_main_channel():
                 logger.error(f"[SCHEDULER] Error posting video {queue_id}: {e}")
         
         logger.info(f"[SCHEDULER] ✅ Posted {posted_count} videos")
+        return posted_count
         
     except Exception as e:
         logger.error(f"[SCHEDULER] Error: {e}")
+        return 0
 
 # ==================== ADMIN COMMANDS ====================
 
@@ -399,6 +408,7 @@ async def start_worker_command(update: Update, context: ContextTypes.DEFAULT_TYP
     global upload_worker_running
     
     if update.effective_user.id != config.ADMIN_ID:
+        await update.message.reply_text(f"❌ Not authorized!\n\nYour ID: `{update.effective_user.id}`\nAdmin ID: `{config.ADMIN_ID}`", parse_mode='Markdown')
         return
     
     if upload_worker_running:
@@ -407,12 +417,14 @@ async def start_worker_command(update: Update, context: ContextTypes.DEFAULT_TYP
     
     asyncio.create_task(upload_worker())
     await update.message.reply_text("✅ Upload worker started!")
+    logger.info(f"[ADMIN] Worker started by user {update.effective_user.id}")
 
 async def stop_worker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop worker command"""
     global upload_worker_running
     
     if update.effective_user.id != config.ADMIN_ID:
+        await update.message.reply_text(f"❌ Not authorized!\n\nYour ID: `{update.effective_user.id}`\nAdmin ID: `{config.ADMIN_ID}`", parse_mode='Markdown')
         return
     
     if not upload_worker_running:
@@ -421,32 +433,40 @@ async def stop_worker_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     upload_worker_running = False
     await update.message.reply_text("✅ Upload worker will stop after current upload!")
+    logger.info(f"[ADMIN] Worker stopped by user {update.effective_user.id}")
 
 async def start_scheduler_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start scheduler command"""
     if update.effective_user.id != config.ADMIN_ID:
+        await update.message.reply_text(f"❌ Not authorized!\n\nYour ID: `{update.effective_user.id}`\nAdmin ID: `{config.ADMIN_ID}`", parse_mode='Markdown')
         return
     
     if scheduler.running:
         await update.message.reply_text("⚠️ Scheduler is already running!")
         return
     
-    scheduler.add_job(
-        post_to_main_channel,
-        'interval',
-        minutes=config.POST_INTERVAL_MINUTES,
-        id='post_job'
-    )
-    scheduler.start()
-    
-    await update.message.reply_text(
-        f"✅ Scheduler started!\n\n"
-        f"📅 Will post {config.VIDEOS_PER_BATCH} videos every {config.POST_INTERVAL_MINUTES} minutes"
-    )
+    try:
+        scheduler.add_job(
+            post_to_main_channel,
+            'interval',
+            minutes=config.POST_INTERVAL_MINUTES,
+            id='post_job'
+        )
+        scheduler.start()
+        
+        await update.message.reply_text(
+            f"✅ Scheduler started!\n\n"
+            f"📅 Will post {config.VIDEOS_PER_BATCH} videos every {config.POST_INTERVAL_MINUTES} minutes"
+        )
+        logger.info(f"[ADMIN] Scheduler started by user {update.effective_user.id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error starting scheduler: {e}")
+        logger.error(f"[ERROR] Failed to start scheduler: {e}")
 
 async def stop_scheduler_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop scheduler command"""
     if update.effective_user.id != config.ADMIN_ID:
+        await update.message.reply_text(f"❌ Not authorized!\n\nYour ID: `{update.effective_user.id}`\nAdmin ID: `{config.ADMIN_ID}`", parse_mode='Markdown')
         return
     
     if not scheduler.running:
@@ -455,6 +475,45 @@ async def stop_scheduler_command(update: Update, context: ContextTypes.DEFAULT_T
     
     scheduler.shutdown()
     await update.message.reply_text("✅ Scheduler stopped!")
+    logger.info(f"[ADMIN] Scheduler stopped by user {update.effective_user.id}")
+
+async def post_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Post videos immediately"""
+    if update.effective_user.id != config.ADMIN_ID:
+        await update.message.reply_text(f"❌ Not authorized!\n\nYour ID: `{update.effective_user.id}`\nAdmin ID: `{config.ADMIN_ID}`", parse_mode='Markdown')
+        return
+    
+    # Get batch size from command args (default to config value)
+    batch_size = config.VIDEOS_PER_BATCH
+    if context.args and context.args[0].isdigit():
+        batch_size = int(context.args[0])
+    
+    # Check if there are videos to post
+    stats = await database.get_queue_stats()
+    if stats['uploaded'] == 0:
+        await update.message.reply_text("⚠️ No uploaded videos to post!")
+        return
+    
+    status_msg = await update.message.reply_text(
+        f"⏳ Posting {min(batch_size, stats['uploaded'])} videos to main channel...\n\nPlease wait..."
+    )
+    
+    try:
+        posted_count = await post_to_main_channel(batch_size=batch_size)
+        
+        if posted_count > 0:
+            await status_msg.edit_text(
+                f"✅ Successfully posted {posted_count} video(s) to main channel!"
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ Failed to post videos. Check logs for details."
+            )
+            
+        logger.info(f"[ADMIN] Manual post by user {update.effective_user.id}: {posted_count} videos")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+        logger.error(f"[ERROR] Manual post failed: {e}")
 
 # ==================== CALLBACK QUERY HANDLER ====================
 
@@ -516,6 +575,7 @@ async def main():
     bot_app.add_handler(CommandHandler("stop_worker", stop_worker_command))
     bot_app.add_handler(CommandHandler("start_scheduler", start_scheduler_command))
     bot_app.add_handler(CommandHandler("stop_scheduler", stop_scheduler_command))
+    bot_app.add_handler(CommandHandler("post_now", post_now_command))
     
     # Storage channel handlers (handles both messages and channel posts)
     bot_app.add_handler(MessageHandler(
