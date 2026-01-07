@@ -378,6 +378,7 @@ async def stop_scheduler_command(client, message: Message):
 # ==================== CALLBACK QUERY HANDLER ====================
 @bot.on_callback_query()
 async def callback_handler(client, callback_query):
+    global upload_worker_running  # Declare at the top of function
     data = callback_query.data
     
     if data == "stats":
@@ -398,7 +399,6 @@ async def callback_handler(client, callback_query):
         await callback_query.message.edit_text(text)
     
     elif data == "start_worker":
-        global upload_worker_running
         if not upload_worker_running:
             asyncio.create_task(upload_worker())
             await callback_query.answer("✅ Worker started!", show_alert=True)
