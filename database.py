@@ -1,182 +1,235 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
+from typing import Optional, List
 import config
 
-Base = declarative_base()
+# MongoDB client
+mongo_client = None
+db = None
 
-# Create engine
-engine = create_engine(config.DATABASE_URL, echo=False)
-Session = scoped_session(sessionmaker(bind=engine))
+# ==================== DATABASE CONNECTION ====================
+async def connect_db():
+    """Connect to MongoDB"""
+    global mongo_client, db
+    
+    try:
+        mongo_client = AsyncIOMotorClient(config.MONGO_URI)
+        db = mongo_client[config.MONGO_DB]
+        
+        # Test connection
+        await db.command('ping')
+        print("✅ Connected to MongoDB successfully!")
+        
+        # Create indexes for better performance
+        await db.upload_queue.create_index("status")
+        await db.upload_queue.create_index("added_at")
+        await db.upload_queue.create_index("message_id")
+        
+        return True
+    except Exception as e:
+        print(f"❌ MongoDB connection failed: {e}")
+        return False
 
-class UploadQueue(Base):
-    """Table to store videos in upload queue"""
-    __tablename__ = 'upload_queue'
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    
-    # Telegram message details
-    message_id = Column(Integer, nullable=False)
-    file_id = Column(String(255), nullable=True)  # For Telegram files
-    file_url = Column(Text, nullable=True)  # For direct download links
-    file_name = Column(String(500), nullable=False)
-    file_size = Column(Integer, nullable=True)
-    
-    # Video metadata
-    title = Column(String(500), nullable=True)
-    description = Column(Text, nullable=True)
-    thumbnail_file_id = Column(String(255), nullable=True)
-    
-    # Upload status
-    status = Column(String(50), default='pending')  # pending, uploading, uploaded, posted, failed
-    lulustream_file_code = Column(String(100), nullable=True)
-    lulustream_url = Column(Text, nullable=True)
-    
-    # Timestamps
-    added_at = Column(DateTime, default=datetime.utcnow)
-    uploaded_at = Column(DateTime, nullable=True)
-    posted_at = Column(DateTime, nullable=True)
-    
-    # Error handling
-    retry_count = Column(Integer, default=0)
-    error_message = Column(Text, nullable=True)
+async def close_db():
+    """Close MongoDB connection"""
+    global mongo_client
+    if mongo_client:
+        mongo_client.close()
+        print("👋 MongoDB connection closed")
 
-class PostSchedule(Base):
-    """Table to track posting schedule"""
-    __tablename__ = 'post_schedule'
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    batch_number = Column(Integer, nullable=False)
-    videos_posted = Column(Integer, default=0)
-    scheduled_time = Column(DateTime, nullable=False)
-    completed = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+def get_db():
+    """Get database instance"""
+    return db
 
-class Stats(Base):
-    """Table to store bot statistics"""
-    __tablename__ = 'stats'
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    total_uploads = Column(Integer, default=0)
-    total_posted = Column(Integer, default=0)
-    total_failed = Column(Integer, default=0)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+# ==================== QUEUE OPERATIONS ====================
 
-# Create all tables
-def init_db():
-    """Initialize database and create all tables"""
-    Base.metadata.create_all(engine)
-    print("✅ Database initialized successfully!")
-
-# Database helper functions
-def add_to_queue(message_id, file_name, file_id=None, file_url=None, file_size=None, 
-                 title=None, description=None, thumbnail_file_id=None):
+async def add_to_queue(
+    message_id: int,
+    file_name: str,
+    file_id: Optional[str] = None,
+    file_url: Optional[str] = None,
+    file_size: Optional[int] = None,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    thumbnail_file_id: Optional[str] = None
+) -> Optional[str]:
     """Add a new video to upload queue"""
-    session = Session()
     try:
-        queue_item = UploadQueue(
-            message_id=message_id,
-            file_id=file_id,
-            file_url=file_url,
-            file_name=file_name,
-            file_size=file_size,
-            title=title or file_name,
-            description=description,
-            thumbnail_file_id=thumbnail_file_id,
-            status='pending'
-        )
-        session.add(queue_item)
-        session.commit()
-        return queue_item.id
+        queue_item = {
+            "message_id": message_id,
+            "file_id": file_id,
+            "file_url": file_url,
+            "file_name": file_name,
+            "file_size": file_size,
+            "title": title or file_name,
+            "description": description,
+            "thumbnail_file_id": thumbnail_file_id,
+            "status": "pending",
+            "lulustream_file_code": None,
+            "lulustream_url": None,
+            "added_at": datetime.utcnow(),
+            "uploaded_at": None,
+            "posted_at": None,
+            "retry_count": 0,
+            "error_message": None
+        }
+        
+        result = await db.upload_queue.insert_one(queue_item)
+        return str(result.inserted_id)
     except Exception as e:
-        session.rollback()
-        print(f"Error adding to queue: {e}")
+        print(f"[ERROR] Add to queue failed: {e}")
         return None
-    finally:
-        session.close()
 
-def get_pending_uploads(limit=None):
+async def get_pending_uploads(limit: Optional[int] = None) -> List:
     """Get pending videos to upload"""
-    session = Session()
     try:
-        query = session.query(UploadQueue).filter_by(status='pending')
+        query = {"status": "pending"}
+        cursor = db.upload_queue.find(query).sort("added_at", 1)
+        
         if limit:
-            query = query.limit(limit)
-        return query.all()
-    finally:
-        session.close()
-
-def get_uploaded_not_posted(limit=None):
-    """Get uploaded videos that haven't been posted yet"""
-    session = Session()
-    try:
-        query = session.query(UploadQueue).filter_by(status='uploaded')
-        if limit:
-            query = query.limit(limit)
-        return query.all()
-    finally:
-        session.close()
-
-def update_upload_status(queue_id, status, lulustream_file_code=None, 
-                        lulustream_url=None, error_message=None):
-    """Update upload status"""
-    session = Session()
-    try:
-        item = session.query(UploadQueue).filter_by(id=queue_id).first()
-        if item:
-            item.status = status
-            if lulustream_file_code:
-                item.lulustream_file_code = lulustream_file_code
-            if lulustream_url:
-                item.lulustream_url = lulustream_url
-            if error_message:
-                item.error_message = error_message
-            if status == 'uploaded':
-                item.uploaded_at = datetime.utcnow()
-            if status == 'posted':
-                item.posted_at = datetime.utcnow()
-            session.commit()
-            return True
-        return False
+            cursor = cursor.limit(limit)
+        
+        return await cursor.to_list(length=limit or 100)
     except Exception as e:
-        session.rollback()
-        print(f"Error updating status: {e}")
-        return False
-    finally:
-        session.close()
+        print(f"[ERROR] Get pending uploads failed: {e}")
+        return []
 
-def get_queue_stats():
-    """Get queue statistics"""
-    session = Session()
+async def get_uploaded_not_posted(limit: Optional[int] = None) -> List:
+    """Get uploaded videos that haven't been posted yet"""
     try:
-        total = session.query(UploadQueue).count()
-        pending = session.query(UploadQueue).filter_by(status='pending').count()
-        uploading = session.query(UploadQueue).filter_by(status='uploading').count()
-        uploaded = session.query(UploadQueue).filter_by(status='uploaded').count()
-        posted = session.query(UploadQueue).filter_by(status='posted').count()
-        failed = session.query(UploadQueue).filter_by(status='failed').count()
+        query = {"status": "uploaded"}
+        cursor = db.upload_queue.find(query).sort("uploaded_at", 1)
+        
+        if limit:
+            cursor = cursor.limit(limit)
+        
+        return await cursor.to_list(length=limit or 100)
+    except Exception as e:
+        print(f"[ERROR] Get uploaded not posted failed: {e}")
+        return []
+
+async def update_upload_status(
+    queue_id: str,
+    status: str,
+    lulustream_file_code: Optional[str] = None,
+    lulustream_url: Optional[str] = None,
+    error_message: Optional[str] = None
+) -> bool:
+    """Update upload status"""
+    try:
+        from bson import ObjectId
+        
+        update_data = {
+            "status": status
+        }
+        
+        if lulustream_file_code:
+            update_data["lulustream_file_code"] = lulustream_file_code
+        
+        if lulustream_url:
+            update_data["lulustream_url"] = lulustream_url
+        
+        if error_message:
+            update_data["error_message"] = error_message
+        
+        if status == "uploaded":
+            update_data["uploaded_at"] = datetime.utcnow()
+        
+        if status == "posted":
+            update_data["posted_at"] = datetime.utcnow()
+        
+        result = await db.upload_queue.update_one(
+            {"_id": ObjectId(queue_id)},
+            {"$set": update_data}
+        )
+        
+        return result.modified_count > 0
+    except Exception as e:
+        print(f"[ERROR] Update status failed: {e}")
+        return False
+
+async def get_queue_stats() -> dict:
+    """Get queue statistics"""
+    try:
+        total = await db.upload_queue.count_documents({})
+        pending = await db.upload_queue.count_documents({"status": "pending"})
+        uploading = await db.upload_queue.count_documents({"status": "uploading"})
+        uploaded = await db.upload_queue.count_documents({"status": "uploaded"})
+        posted = await db.upload_queue.count_documents({"status": "posted"})
+        failed = await db.upload_queue.count_documents({"status": "failed"})
         
         return {
-            'total': total,
-            'pending': pending,
-            'uploading': uploading,
-            'uploaded': uploaded,
-            'posted': posted,
-            'failed': failed
+            "total": total,
+            "pending": pending,
+            "uploading": uploading,
+            "uploaded": uploaded,
+            "posted": posted,
+            "failed": failed
         }
-    finally:
-        session.close()
+    except Exception as e:
+        print(f"[ERROR] Get queue stats failed: {e}")
+        return {
+            "total": 0,
+            "pending": 0,
+            "uploading": 0,
+            "uploaded": 0,
+            "posted": 0,
+            "failed": 0
+        }
 
-def increment_retry_count(queue_id):
+async def increment_retry_count(queue_id: str) -> int:
     """Increment retry count for failed uploads"""
-    session = Session()
     try:
-        item = session.query(UploadQueue).filter_by(id=queue_id).first()
-        if item:
-            item.retry_count += 1
-            session.commit()
-            return item.retry_count
+        from bson import ObjectId
+        
+        result = await db.upload_queue.update_one(
+            {"_id": ObjectId(queue_id)},
+            {"$inc": {"retry_count": 1}}
+        )
+        
+        if result.modified_count > 0:
+            item = await db.upload_queue.find_one({"_id": ObjectId(queue_id)})
+            return item.get("retry_count", 0)
+        
         return 0
-    finally:
-        session.close()
+    except Exception as e:
+        print(f"[ERROR] Increment retry count failed: {e}")
+        return 0
+
+async def get_queue_item(queue_id: str) -> Optional[dict]:
+    """Get a specific queue item by ID"""
+    try:
+        from bson import ObjectId
+        return await db.upload_queue.find_one({"_id": ObjectId(queue_id)})
+    except Exception as e:
+        print(f"[ERROR] Get queue item failed: {e}")
+        return None
+
+async def delete_queue_item(queue_id: str) -> bool:
+    """Delete a queue item"""
+    try:
+        from bson import ObjectId
+        result = await db.upload_queue.delete_one({"_id": ObjectId(queue_id)})
+        return result.deleted_count > 0
+    except Exception as e:
+        print(f"[ERROR] Delete queue item failed: {e}")
+        return False
+
+async def clear_failed_uploads() -> int:
+    """Clear all failed uploads from queue"""
+    try:
+        result = await db.upload_queue.delete_many({"status": "failed"})
+        return result.deleted_count
+    except Exception as e:
+        print(f"[ERROR] Clear failed uploads failed: {e}")
+        return 0
+
+async def get_recent_posts(limit: int = 10) -> List:
+    """Get recently posted videos"""
+    try:
+        query = {"status": "posted"}
+        cursor = db.upload_queue.find(query).sort("posted_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
+    except Exception as e:
+        print(f"[ERROR] Get recent posts failed: {e}")
+        return []
