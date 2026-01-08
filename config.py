@@ -18,6 +18,9 @@ MAIN_CHANNEL_ID = int(getenv("MAIN_CHANNEL_ID", "0"))
 
 # Admin user ID (your Telegram ID)
 ADMIN_ID = int(getenv("ADMIN_ID", "1206988513"))
+# Admin IDs list for worker commands
+ADMIN_IDS = [ADMIN_ID]  # Convert single ID to list
+
 
 # ==================== LULUSTREAM API ====================
 LULUSTREAM_API_KEY = getenv("LULUSTREAM_API_KEY", "")
