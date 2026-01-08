@@ -663,8 +663,35 @@ async def post_shutdown(application: Application):
     await database.close_db()
     logger.info("✅ Cleanup completed")
 
+# ==================== HEALTH CHECK SERVER ====================
+
+from aiohttp import web
+
+async def health_check(request):
+    """Health check endpoint for Koyeb"""
+    return web.Response(text="OK", status=200)
+
+async def start_health_server():
+    """Start health check web server"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    await site.start()
+    logger.info("✅ Health check server started on port 8000")
+
 def main():
     """Start the bot"""
+    
+    # Start health check server in background
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(start_health_server())
+    
     # Create application
     application = Application.builder().token(config.BOT_TOKEN).build()
     
@@ -696,4 +723,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
+                
