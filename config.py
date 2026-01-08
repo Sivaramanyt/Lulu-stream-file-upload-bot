@@ -17,7 +17,7 @@ STORAGE_CHANNEL_ID = int(getenv("STORAGE_CHANNEL_ID", "0"))
 MAIN_CHANNEL_ID = int(getenv("MAIN_CHANNEL_ID", "0"))
 
 # Admin user ID (your Telegram ID)
-ADMIN_ID = int(getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(getenv("ADMIN_ID", "1206988513"))
 
 # ==================== LULUSTREAM API ====================
 LULUSTREAM_API_KEY = getenv("LULUSTREAM_API_KEY", "")
