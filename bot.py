@@ -1,675 +1,699 @@
+# PART 1 - bot.py (Lines 1-500)
+
+import asyncio
+import logging
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 import config
 import database
 from lulustream import LuluStreamClient
-import os
-import tempfile
-import asyncio
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
-from aiohttp import web
-import logging
+import re
+from urllib.parse import urlparse
 
-# Setup logging
+# Enable logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Initialize scheduler and client
-scheduler = AsyncIOScheduler()
-lulu_client = LuluStreamClient()
+# Initialize LuluStream client
+lulu_client = LuluStreamClient(config.LULUSTREAM_API_KEY)
 
-# Upload worker flag
-upload_worker_running = False
+# Global worker control
+worker_running = False
+worker_task = None
+scheduler_running = False
+scheduler_task = None
 
-# Bot application (will be set in main)
-bot_app = None
+# ==================== HELPER FUNCTIONS ====================
 
-# ==================== WEB SERVER FOR KOYEB HEALTH CHECKS ====================
-async def health_check(request):
-    """Health check endpoint for Koyeb"""
-    return web.Response(text='OK', status=200)
+def is_admin(user_id: int) -> bool:
+    """Check if user is admin"""
+    return user_id in config.ADMIN_IDS
 
-async def status_page(request):
-    """Status page"""
-    stats = await database.get_queue_stats()
-    html = f"""
-    <html>
-    <head><title>LuluStream Bot Status</title></head>
-    <body style="font-family: Arial; padding: 20px;">
-        <h1>🎬 LuluStream Bot</h1>
-        <h2>✅ Bot is Running!</h2>
-        <hr>
-        <h3>📊 Queue Statistics:</h3>
-        <ul>
-            <li>📦 Total: {stats['total']}</li>
-            <li>⏳ Pending: {stats['pending']}</li>
-            <li>⬆️ Uploading: {stats['uploading']}</li>
-            <li>✅ Uploaded: {stats['uploaded']}</li>
-            <li>📤 Posted: {stats['posted']}</li>
-            <li>❌ Failed: {stats['failed']}</li>
-        </ul>
-        <hr>
-        <p>🤖 Worker: {'Running' if upload_worker_running else 'Stopped'}</p>
-        <p>📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}</p>
-    </body>
-    </html>
-    """
-    return web.Response(text=html, content_type='text/html')
-
-async def start_web_server():
-    """Start web server for health checks"""
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/', status_page)
+def format_size(size_bytes):
+    """Format bytes to human readable size"""
+    if not size_bytes:
+        return "Unknown"
     
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8000)
-    await site.start()
-    logger.info("✅ Web server started on port 8000")
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.2f} TB"
 
-# ==================== BOT COMMANDS ====================
+def extract_video_url(text: str) -> str:
+    """Extract video URL from message text"""
+    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    urls = re.findall(url_pattern, text)
+    return urls[0] if urls else None
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler"""
-    text = """🎬 LuluStream Auto Upload Bot
+async def download_file_from_url(url: str, file_path: str) -> bool:
+    """Download file from URL"""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    with open(file_path, 'wb') as f:
+                        while True:
+                            chunk = await response.content.read(1024 * 1024)  # 1MB chunks
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                    return True
+                else:
+                    logger.error(f"Failed to download file: {response.status}")
+                    return False
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        return False
 
-Features:
-✅ Auto upload to LuluStream
-✅ Scheduled posting to main channel
-✅ Supports video files & direct links
-✅ Bulk upload support
-✅ MongoDB database (persistent)
+# ==================== COMMAND HANDLERS ====================
 
-How to use:
-1. Forward videos to storage channel
-2. Bot uploads to LuluStream
-3. Posts 10 videos per hour to main channel
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message"""
+    user = update.effective_user
+    
+    welcome_text = f"""
+👋 Welcome {user.first_name}!
 
-Commands:
-/stats - Queue statistics
+🎬 **LuluStream Auto Upload Bot**
+
+I can automatically upload videos to LuluStream and post them to your channel.
+
+📝 **Commands:**
+/help - Show all commands
+/stats - Show queue statistics
+/add_url - Add video URL to queue
+/add_file - Upload and add file to queue
+
+👨‍💼 **Admin Commands:**
 /start_worker - Start upload worker
 /stop_worker - Stop upload worker
-/start_scheduler - Start auto posting
-/stop_scheduler - Stop auto posting
-/post_now - Post videos immediately"""
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 Statistics", callback_data="stats")],
-        [InlineKeyboardButton("🔄 Start Worker", callback_data="start_worker"),
-         InlineKeyboardButton("⏸ Stop Worker", callback_data="stop_worker")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(text, reply_markup=reply_markup)
+/start_scheduler - Start auto-posting
+/stop_scheduler - Stop auto-posting
+/post_now - Post one video immediately
+/clear_failed - Clear failed uploads
+/queue - Show upload queue
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stats command handler"""
-    if update.effective_user.id != config.ADMIN_ID:
-        await update.message.reply_text(
-            f"❌ You are not authorized!\n\n"
-            f"Your ID: {update.effective_user.id}\n"
-            f"Admin ID: {config.ADMIN_ID}"
-        )
+Developed with ❤️
+"""
+    
+    await update.message.reply_text(welcome_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help message"""
+    help_text = """
+📚 **Available Commands:**
+
+**User Commands:**
+/start - Start the bot
+/help - Show this help message
+/stats - Show queue statistics
+/add_url <url> - Add video URL to queue
+/add_file - Upload video file directly
+
+**Admin Commands:**
+/start_worker - Start background upload worker
+/stop_worker - Stop upload worker
+/start_scheduler - Start automatic posting
+/stop_scheduler - Stop automatic posting
+/post_now - Post one video immediately
+/queue - Show current upload queue
+/clear_failed - Clear all failed uploads
+
+**How It Works:**
+1. Send video URL or file
+2. Bot adds to upload queue
+3. Worker uploads to LuluStream
+4. Scheduler posts to main channel
+
+**Support:** Contact admin if you face any issues.
+"""
+    
+    await update.message.reply_text(help_text)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show queue statistics"""
+    try:
+        stats_data = await database.get_queue_stats()
+        
+        stats_text = f"""
+📊 **Queue Statistics**
+
+📦 Total: {stats_data['total']}
+⏳ Pending: {stats_data['pending']}
+⬆️ Uploading: {stats_data['uploading']}
+✅ Uploaded: {stats_data['uploaded']}
+📤 Posted: {stats_data['posted']}
+❌ Failed: {stats_data['failed']}
+
+🤖 Worker: {'🟢 Running' if worker_running else '🔴 Stopped'}
+⏰ Scheduler: {'🟢 Running' if scheduler_running else '🔴 Stopped'}
+"""
+        
+        await update.message.reply_text(stats_text)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error getting stats: {str(e)}")
+
+async def add_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add video URL to queue"""
+    if not context.args:
+        await update.message.reply_text("❌ Please provide a video URL\n\nUsage: /add_url <url>")
         return
     
-    stats = await database.get_queue_stats()
+    url = context.args[0]
     
-    text = f"""📊 Queue Statistics
-
-📦 Total: {stats['total']}
-⏳ Pending: {stats['pending']}
-⬆️ Uploading: {stats['uploading']}
-✅ Uploaded: {stats['uploaded']}
-📤 Posted: {stats['posted']}
-❌ Failed: {stats['failed']}
-
-🤖 Worker: {'Running' if upload_worker_running else 'Stopped'}
-📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}
-
-👤 Your ID: {update.effective_user.id}"""
-    
-    await update.message.reply_text(text)
-
-# ==================== HANDLE FILES FROM STORAGE CHANNEL ====================
-
-async def handle_storage_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle video files sent to storage channel"""
+    # Validate URL
     try:
-        # Get message (works for both messages and channel posts)
-        message = update.message or update.channel_post
-        if not message:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            await update.message.reply_text("❌ Invalid URL format")
             return
-        
-        # Get file info
-        if message.video:
-            file_obj = message.video
-            file_name = file_obj.file_name or f"video_{message.message_id}.mp4"
-        elif message.document:
-            file_obj = message.document
-            file_name = file_obj.file_name or f"video_{message.message_id}.mp4"
-        else:
-            return
-        
-        file_size = file_obj.file_size
-        file_id = file_obj.file_id
-        
-        # Get caption as title and description
-        caption = message.caption or file_name
-        title = caption.split('\n')[0][:200]  # First line as title
-        description = caption if len(caption) > len(title) else None
-        
-        # Get thumbnail
-        thumbnail_file_id = None
-        if hasattr(file_obj, 'thumb') and file_obj.thumb:
-            thumbnail_file_id = file_obj.thumb.file_id
+    except:
+        await update.message.reply_text("❌ Invalid URL")
+        return
+    
+    try:
+        # Extract filename from URL
+        filename = url.split('/')[-1] or f"video_{datetime.now().timestamp()}.mp4"
         
         # Add to queue
         queue_id = await database.add_to_queue(
-            message_id=message.message_id,
-            file_name=file_name,
-            file_id=file_id,
-            file_size=file_size,
-            title=title,
-            description=description,
-            thumbnail_file_id=thumbnail_file_id
+            message_id=update.message.message_id,
+            file_name=filename,
+            file_url=url,
+            title=filename
         )
         
         if queue_id:
-            await message.reply_text(
+            await update.message.reply_text(
                 f"✅ Added to queue!\n\n"
-                f"📝 Title: {title}\n"
-                f"📦 Size: {file_size / (1024*1024):.2f} MB\n"
-                f"🆔 Queue ID: {queue_id[:8]}..."
+                f"📝 File: {filename}\n"
+                f"🔗 URL: {url}\n"
+                f"🆔 Queue ID: {queue_id}\n\n"
+                f"Use /start_worker to begin uploading"
             )
-            logger.info(f"[QUEUE] Added video: {file_name} (ID: {queue_id})")
         else:
-            await message.reply_text("❌ Failed to add to queue!")
-            
+            await update.message.reply_text("❌ Failed to add to queue")
+    
     except Exception as e:
-        logger.error(f"[ERROR] Handle storage file: {e}")
-        if message:
-            await message.reply_text(f"❌ Error: {e}")
+        logger.error(f"Error adding URL: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
-async def handle_storage_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle direct download links sent to storage channel"""
+async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle video file uploads"""
     try:
-        # Get message (works for both messages and channel posts)
-        message = update.message or update.channel_post
-        if not message or not message.text:
+        video = update.message.video or update.message.document
+        
+        if not video:
             return
-        
-        text = message.text.strip()
-        
-        # Check if it's a URL
-        if not (text.startswith('http://') or text.startswith('https://')):
-            return
-        
-        # Extract info from message
-        lines = text.split('\n')
-        video_url = lines[0]
-        title = lines[1] if len(lines) > 1 else f"Video_{message.message_id}"
-        description = '\n'.join(lines[2:]) if len(lines) > 2 else None
         
         # Add to queue
         queue_id = await database.add_to_queue(
-            message_id=message.message_id,
-            file_name=title,
-            file_url=video_url,
-            title=title,
-            description=description
+            message_id=update.message.message_id,
+            file_name=video.file_name or f"video_{datetime.now().timestamp()}.mp4",
+            file_id=video.file_id,
+            file_size=video.file_size,
+            title=video.file_name or "Untitled Video"
         )
         
         if queue_id:
-            await message.reply_text(
-                f"✅ URL added to queue!\n\n"
-                f"🔗 URL: {video_url}\n"
-                f"📝 Title: {title}\n"
-                f"🆔 Queue ID: {queue_id[:8]}..."
+            await update.message.reply_text(
+                f"✅ Video added to queue!\n\n"
+                f"📝 File: {video.file_name}\n"
+                f"💾 Size: {format_size(video.file_size)}\n"
+                f"🆔 Queue ID: {queue_id}\n\n"
+                f"Use /start_worker to begin uploading"
             )
-            logger.info(f"[QUEUE] Added URL: {title} (ID: {queue_id})")
         else:
-            await message.reply_text("❌ Failed to add URL to queue!")
-            
+            await update.message.reply_text("❌ Failed to add video to queue")
+    
     except Exception as e:
-        logger.error(f"[ERROR] Handle storage link: {e}")
-        if message:
-            await message.reply_text(f"❌ Error: {e}")
+        logger.error(f"Error handling video: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
-# ==================== UPLOAD WORKER ====================
+# ==================== WORKER FUNCTIONS ====================
 
 async def upload_worker():
-    """Worker to process upload queue"""
-    global upload_worker_running
+    """Background worker to upload videos to LuluStream"""
+    global worker_running
     
-    logger.info("[WORKER] Upload worker started!")
-    upload_worker_running = True
+    logger.info("[WORKER] Started")
     
-    while upload_worker_running:
+    while worker_running:
         try:
             # Get pending uploads
             pending = await database.get_pending_uploads(limit=1)
             
             if not pending:
+                logger.info("[WORKER] No pending uploads, waiting...")
                 await asyncio.sleep(10)
                 continue
             
-            item = pending[0]
-            queue_id = str(item['_id'])
-            logger.info(f"[WORKER] Processing: {item['title']} (ID: {queue_id[:8]}...)")
+            video = pending[0]
+            queue_id = str(video['_id'])
+            
+            logger.info(f"[WORKER] Processing: {video['file_name']}")
             
             # Update status to uploading
-            await database.update_upload_status(queue_id, 'uploading')
+            await database.update_upload_status(queue_id, "uploading")
             
-            # Upload to LuluStream
-            result = None
-            
-            if item.get('file_url'):
-                # Upload by URL
-                logger.info(f"[WORKER] Uploading by URL: {item['file_url']}")
-                result = lulu_client.upload_by_url(
-                    video_url=item['file_url'],
-                    title=item['title'],
-                    description=item.get('description')
-                )
-            
-            elif item.get('file_id'):
-                # Download file from Telegram and upload
-                logger.info(f"[WORKER] Downloading from Telegram: {item['file_id']}")
-                
-                # Create temp file
-                temp_dir = tempfile.mkdtemp()
-                temp_file = os.path.join(temp_dir, item['file_name'])
-                
-                try:
-                    # Download file
-                    file = await bot_app.bot.get_file(item['file_id'])
-                    await file.download_to_drive(temp_file)
-                    logger.info(f"[WORKER] Downloaded to: {temp_file}")
+            try:
+                # Download file if URL provided
+                if video.get('file_url'):
+                    temp_file = f"temp_{queue_id}.mp4"
+                    logger.info(f"[WORKER] Downloading from URL: {video['file_url']}")
                     
-                    # Upload to LuluStream
-                    result = lulu_client.upload_file(
-                        file_path=temp_file,
-                        title=item['title'],
-                        description=item.get('description')
+                    success = await download_file_from_url(video['file_url'], temp_file)
+                    if not success:
+                        raise Exception("Failed to download file")
+                    
+                    file_path = temp_file
+                
+                # Download from Telegram if file_id provided
+                elif video.get('file_id'):
+                    # This requires bot instance, will be handled in main
+                    logger.error("[WORKER] Telegram file download not implemented yet")
+                    raise Exception("Telegram file download not supported in worker")
+                
+                else:
+                    raise Exception("No file URL or file ID provided")
+                
+                # Upload to LuluStream
+                logger.info(f"[WORKER] Uploading to LuluStream...")
+                result = lulu_client.upload_file(file_path, video['file_name'])
+                
+                if result and result.get('status') == 200:
+                    result_data = result.get('result', {})
+                    filecode = result_data.get('filecode')
+                    url = result_data.get('url')
+                    
+                    if filecode and url:
+                        logger.info(f"[WORKER] Upload successful! Filecode: {filecode}")
+                        
+                        # Get file info from LuluStream to get original title and thumbnail
+                        file_info = lulu_client.get_file_info(filecode)
+                        
+                        original_title = None
+                        thumbnail_url = None
+                        
+                        if file_info and file_info.get('status') == 200:
+                            result_data = file_info.get('result', {})
+                            if isinstance(result_data, list) and len(result_data) > 0:
+                                result_data = result_data[0]
+                            
+                            original_title = result_data.get('file_title') or result_data.get('title')
+                            thumbnail_url = result_data.get('player_img') or result_data.get('thumbnail')  # ✅ FIXED LINE
+                            
+                            logger.info(f"[WORKER] Original title: {original_title}")
+                            logger.info(f"[WORKER] Thumbnail: {thumbnail_url}")
+                        
+                        # Update status to uploaded
+                        await database.update_upload_status(
+                            queue_id,
+                            "uploaded",
+                            lulustream_file_code=filecode,
+                            lulustream_url=url,
+                            original_title=original_title,
+                            thumbnail_url=thumbnail_url
+                        )
+                        
+                        # Clean up temp file
+                        if video.get('file_url'):
+                            import os
+                            try:
+                                os.remove(file_path)
+                            except:
+                                pass
+                    else:
+                        raise Exception("No filecode or URL in response")
+                else:
+                    error_msg = result.get('msg', 'Unknown error') if result else 'No response'
+                    raise Exception(f"Upload failed: {error_msg}")
+            
+            except Exception as e:
+                logger.error(f"[WORKER] Upload failed: {e}")
+                
+                # Increment retry count
+                retry_count = await database.increment_retry_count(queue_id)
+                
+                if retry_count >= config.MAX_RETRIES:
+                    await database.update_upload_status(
+                        queue_id,
+                        "failed",
+                        error_message=str(e)
                     )
-                    
-                finally:
-                    # Clean up temp file
-                    try:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                        os.rmdir(temp_dir)
-                    except:
-                        pass
-            
-            # Handle result
-            if result and result.get('success'):
-                filecode = result['filecode']
-                url = result['url']
-                
-                # Get file info from LuluStream to get original title and thumbnail
-                file_info = lulu_client.get_file_info(filecode)
-                
-                original_title = None
-                thumbnail_url = None
-                
-                if file_info and file_info.get('status') == 200:
-                    result_data = file_info.get('result', {})
-                    if isinstance(result_data, list) and len(result_data) > 0:
-                        result_data = result_data[0]
-                    
-                    original_title = result_data.get('file_title') or result_data.get('title')
-                    thumbnail_url = result_data.get('splash_img') or result_data.get('thumbnail')
-                    
-                    logger.info(f"[WORKER] Original title: {original_title}")
-                    logger.info(f"[WORKER] Thumbnail: {thumbnail_url}")
-                
-                # Update database with all info
-                await database.update_upload_status(
-                    queue_id,
-                    'uploaded',
-                    lulustream_file_code=filecode,
-                    lulustream_url=url,
-                    original_title=original_title,
-                    thumbnail_url=thumbnail_url
-                )
-                
-                logger.info(f"[WORKER] ✅ Uploaded: {original_title or item['title']}")
-                logger.info(f"[WORKER] URL: {url}")
-            else:
-                error_msg = result.get('error', 'Unknown error') if result else 'Upload failed'
-                await database.update_upload_status(
-                    queue_id,
-                    'failed',
-                    error_message=error_msg
-                )
-                await database.increment_retry_count(queue_id)
-                logger.error(f"[WORKER] ❌ Failed: {error_msg}")
-            
+                    logger.error(f"[WORKER] Max retries reached, marked as failed")
+                else:
+                    await database.update_upload_status(
+                        queue_id,
+                        "pending",
+                        error_message=str(e)
+                    )
+                    logger.info(f"[WORKER] Retry {retry_count}/{config.MAX_RETRIES}")
+        
         except Exception as e:
             logger.error(f"[WORKER] Error: {e}")
             await asyncio.sleep(5)
     
-    logger.info("[WORKER] Upload worker stopped!")
+    logger.info("[WORKER] Stopped")
 
-# ==================== POST SCHEDULER ====================
+# PART 2 - bot.py (Lines 401 onwards)
 
-async def post_to_main_channel(batch_size=None):
-    """Post uploaded videos to main channel"""
-    try:
-        if batch_size is None:
-            batch_size = config.VIDEOS_PER_BATCH
+async def post_scheduler():
+    """Background scheduler to post videos to main channel"""
+    global scheduler_running
+    
+    logger.info("[SCHEDULER] Started")
+    
+    while scheduler_running:
+        try:
+            # Get uploaded but not posted videos
+            ready_to_post = await database.get_uploaded_not_posted(limit=1)
             
-        logger.info(f"[SCHEDULER] Posting batch of {batch_size} to main channel...")
-        
-        # Get uploaded videos that haven't been posted
-        videos = await database.get_uploaded_not_posted(limit=batch_size)
-        
-        if not videos:
-            logger.info("[SCHEDULER] No videos to post")
-            return 0
-        
-        posted_count = 0
-        
-        for video in videos:
+            if not ready_to_post:
+                logger.info("[SCHEDULER] No videos ready to post, waiting...")
+                await asyncio.sleep(60)  # Check every minute
+                continue
+            
+            video = ready_to_post[0]
+            queue_id = str(video['_id'])
+            
+            logger.info(f"[SCHEDULER] Posting: {video['file_name']}")
+            
             try:
-                queue_id = str(video['_id'])
+                # Post to main channel
+                success = await post_to_main_channel(video)
                 
-                # Use original title from LuluStream if available, else use upload title
-                title = video.get('original_title') or video['title']
-                
-                # Create message text - only watch link, no download
-                text = f"""🎬 {title}
-
-{video.get('description') or ''}
-
-▶️ Watch Now"""
-                
-                # Create inline keyboard - only Watch button
-                keyboard = [
-                    [InlineKeyboardButton("▶️ Watch Now", url=video['lulustream_url'])]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # Get thumbnail URL
-                thumbnail_url = video.get('thumbnail_url')
-                
-                # Send to main channel with thumbnail if available
-                if thumbnail_url:
-                    try:
-                        # Send as photo with caption
-                        await bot_app.bot.send_photo(
-                            chat_id=config.MAIN_CHANNEL_ID,
-                            photo=thumbnail_url,
-                            caption=text,
-                            reply_markup=reply_markup
-                        )
-                        logger.info(f"[SCHEDULER] Posted with thumbnail: {title}")
-                    except Exception as e:
-                        logger.warning(f"[SCHEDULER] Failed to send thumbnail, sending text: {e}")
-                        # Fallback to text message if thumbnail fails
-                        await bot_app.bot.send_message(
-                            chat_id=config.MAIN_CHANNEL_ID,
-                            text=text,
-                            reply_markup=reply_markup
-                        )
-                        logger.info(f"[SCHEDULER] Posted without thumbnail: {title}")
+                if success:
+                    await database.update_upload_status(queue_id, "posted")
+                    logger.info(f"[SCHEDULER] Posted successfully!")
+                    
+                    # Wait before posting next video
+                    await asyncio.sleep(config.POST_INTERVAL)
                 else:
-                    # No thumbnail, send as text message
-                    await bot_app.bot.send_message(
-                        chat_id=config.MAIN_CHANNEL_ID,
-                        text=text,
-                        reply_markup=reply_markup
-                    )
-                    logger.info(f"[SCHEDULER] Posted without thumbnail: {title}")
-                
-                # Update status
-                await database.update_upload_status(queue_id, 'posted')
-                posted_count += 1
-                
-                # Small delay between posts
-                await asyncio.sleep(2)
-                
+                    logger.error(f"[SCHEDULER] Failed to post")
+                    await asyncio.sleep(60)
+            
             except Exception as e:
-                logger.error(f"[SCHEDULER] Error posting video {queue_id}: {e}")
+                logger.error(f"[SCHEDULER] Error posting: {e}")
+                await asyncio.sleep(60)
         
-        logger.info(f"[SCHEDULER] ✅ Posted {posted_count} videos")
-        return posted_count
+        except Exception as e:
+            logger.error(f"[SCHEDULER] Error: {e}")
+            await asyncio.sleep(60)
+    
+    logger.info("[SCHEDULER] Stopped")
+
+async def post_to_main_channel(video: dict) -> bool:
+    """Post video to main channel"""
+    try:
+        from telegram import Bot
+        bot = Bot(token=config.BOT_TOKEN)
         
+        # Use original title from LuluStream if available, otherwise use queue title
+        title = video.get('original_title') or video['title']
+        
+        # Create caption
+        caption = f"""
+😍{config.CHANNEL_TITLE}😍
+
+🎬 {title}
+
+{config.CAPTION_TEXT}
+"""
+        
+        # Create watch button (removed download button)
+        watch_url = f"https://lulustream.com/{video['lulustream_file_code']}"
+        
+        keyboard = [
+            [InlineKeyboardButton("▶️ Watch Now", url=watch_url)]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Try to send with thumbnail if available
+        thumbnail_url = video.get('thumbnail_url')
+        
+        if thumbnail_url:
+            try:
+                logger.info(f"[POST] Sending with thumbnail: {thumbnail_url}")
+                await bot.send_photo(
+                    chat_id=config.MAIN_CHANNEL_ID,
+                    photo=thumbnail_url,
+                    caption=caption,
+                    reply_markup=reply_markup
+                )
+                return True
+            except Exception as e:
+                logger.error(f"[POST] Failed to send with thumbnail: {e}")
+                # Fall back to text message
+        
+        # Send as text message if no thumbnail or thumbnail failed
+        await bot.send_message(
+            chat_id=config.MAIN_CHANNEL_ID,
+            text=caption,
+            reply_markup=reply_markup
+        )
+        
+        return True
+    
     except Exception as e:
-        logger.error(f"[SCHEDULER] Error: {e}")
-        return 0
+        logger.error(f"[POST] Error posting to channel: {e}")
+        return False
 
 # ==================== ADMIN COMMANDS ====================
 
 async def start_worker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start worker command"""
-    global upload_worker_running
-    
-    if update.effective_user.id != config.ADMIN_ID:
-        await update.message.reply_text(
-            f"❌ Not authorized!\n\n"
-            f"Your ID: {update.effective_user.id}\n"
-            f"Admin ID: {config.ADMIN_ID}"
-        )
+    """Start upload worker"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only command")
         return
     
-    if upload_worker_running:
+    global worker_running, worker_task
+    
+    if worker_running:
         await update.message.reply_text("⚠️ Worker is already running!")
         return
     
-    asyncio.create_task(upload_worker())
+    worker_running = True
+    worker_task = asyncio.create_task(upload_worker())
+    
     await update.message.reply_text("✅ Upload worker started!")
-    logger.info(f"[ADMIN] Worker started by user {update.effective_user.id}")
+    logger.info("Upload worker started by admin")
 
 async def stop_worker_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop worker command"""
-    global upload_worker_running
-    
-    if update.effective_user.id != config.ADMIN_ID:
-        await update.message.reply_text(
-            f"❌ Not authorized!\n\n"
-            f"Your ID: {update.effective_user.id}\n"
-            f"Admin ID: {config.ADMIN_ID}"
-        )
+    """Stop upload worker"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only command")
         return
     
-    if not upload_worker_running:
+    global worker_running, worker_task
+    
+    if not worker_running:
         await update.message.reply_text("⚠️ Worker is not running!")
         return
     
-    upload_worker_running = False
-    await update.message.reply_text("✅ Upload worker will stop after current upload!")
-    logger.info(f"[ADMIN] Worker stopped by user {update.effective_user.id}")
+    worker_running = False
+    
+    if worker_task:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+    
+    await update.message.reply_text("✅ Upload worker stopped!")
+    logger.info("Upload worker stopped by admin")
 
 async def start_scheduler_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start scheduler command"""
-    if update.effective_user.id != config.ADMIN_ID:
-        await update.message.reply_text(
-            f"❌ Not authorized!\n\n"
-            f"Your ID: {update.effective_user.id}\n"
-            f"Admin ID: {config.ADMIN_ID}"
-        )
+    """Start post scheduler"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only command")
         return
     
-    if scheduler.running:
+    global scheduler_running, scheduler_task
+    
+    if scheduler_running:
         await update.message.reply_text("⚠️ Scheduler is already running!")
         return
     
-    try:
-        scheduler.add_job(
-            post_to_main_channel,
-            'interval',
-            minutes=config.POST_INTERVAL_MINUTES,
-            id='post_job'
-        )
-        scheduler.start()
-        
-        await update.message.reply_text(
-            f"✅ Scheduler started!\n\n"
-            f"📅 Will post {config.VIDEOS_PER_BATCH} videos every {config.POST_INTERVAL_MINUTES} minutes"
-        )
-        logger.info(f"[ADMIN] Scheduler started by user {update.effective_user.id}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error starting scheduler: {e}")
-        logger.error(f"[ERROR] Failed to start scheduler: {e}")
+    scheduler_running = True
+    scheduler_task = asyncio.create_task(post_scheduler())
+    
+    await update.message.reply_text("✅ Post scheduler started!")
+    logger.info("Post scheduler started by admin")
 
 async def stop_scheduler_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop scheduler command"""
-    if update.effective_user.id != config.ADMIN_ID:
-        await update.message.reply_text(
-            f"❌ Not authorized!\n\n"
-            f"Your ID: {update.effective_user.id}\n"
-            f"Admin ID: {config.ADMIN_ID}"
-        )
+    """Stop post scheduler"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only command")
         return
     
-    if not scheduler.running:
+    global scheduler_running, scheduler_task
+    
+    if not scheduler_running:
         await update.message.reply_text("⚠️ Scheduler is not running!")
         return
     
-    scheduler.shutdown()
-    await update.message.reply_text("✅ Scheduler stopped!")
-    logger.info(f"[ADMIN] Scheduler stopped by user {update.effective_user.id}")
+    scheduler_running = False
+    
+    if scheduler_task:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
+    
+    await update.message.reply_text("✅ Post scheduler stopped!")
+    logger.info("Post scheduler stopped by admin")
 
 async def post_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Post videos immediately"""
-    if update.effective_user.id != config.ADMIN_ID:
-        await update.message.reply_text(
-            f"❌ Not authorized!\n\n"
-            f"Your ID: {update.effective_user.id}\n"
-            f"Admin ID: {config.ADMIN_ID}"
-        )
+    """Post one video immediately"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only command")
         return
-    
-    # Get batch size from command args (default to config value)
-    batch_size = config.VIDEOS_PER_BATCH
-    if context.args and context.args[0].isdigit():
-        batch_size = int(context.args[0])
-    
-    # Check if there are videos to post
-    stats = await database.get_queue_stats()
-    if stats['uploaded'] == 0:
-        await update.message.reply_text("⚠️ No uploaded videos to post!")
-        return
-    
-    status_msg = await update.message.reply_text(
-        f"⏳ Posting {min(batch_size, stats['uploaded'])} videos to main channel...\n\nPlease wait..."
-    )
     
     try:
-        posted_count = await post_to_main_channel(batch_size=batch_size)
+        # Get one uploaded video
+        ready_to_post = await database.get_uploaded_not_posted(limit=1)
         
-        if posted_count > 0:
-            await status_msg.edit_text(
-                f"✅ Successfully posted {posted_count} video(s) to main channel!"
-            )
+        if not ready_to_post:
+            await update.message.reply_text("⚠️ No videos ready to post")
+            return
+        
+        video = ready_to_post[0]
+        queue_id = str(video['_id'])
+        
+        await update.message.reply_text(f"📤 Posting: {video['file_name']}...")
+        
+        success = await post_to_main_channel(video)
+        
+        if success:
+            await database.update_upload_status(queue_id, "posted")
+            await update.message.reply_text("✅ Posted successfully!")
         else:
-            await status_msg.edit_text(
-                f"❌ Failed to post videos. Check logs for details."
-            )
-            
-        logger.info(f"[ADMIN] Manual post by user {update.effective_user.id}: {posted_count} videos")
+            await update.message.reply_text("❌ Failed to post")
+    
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {e}")
-        logger.error(f"[ERROR] Manual post failed: {e}")
+        logger.error(f"Error in post_now: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
-# ==================== CALLBACK QUERY HANDLER ====================
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle callback queries"""
-    global upload_worker_running
+async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show upload queue"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only command")
+        return
     
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "stats":
-        stats = await database.get_queue_stats()
-        text = f"""📊 Queue Statistics
-
-📦 Total: {stats['total']}
-⏳ Pending: {stats['pending']}
-⬆️ Uploading: {stats['uploading']}
-✅ Uploaded: {stats['uploaded']}
-📤 Posted: {stats['posted']}
-❌ Failed: {stats['failed']}
-
-🤖 Worker: {'Running' if upload_worker_running else 'Stopped'}
-📅 Scheduler: {'Running' if scheduler.running else 'Stopped'}"""
+    try:
+        pending = await database.get_pending_uploads(limit=10)
         
-        await query.edit_message_text(text)
+        if not pending:
+            await update.message.reply_text("📭 Queue is empty")
+            return
+        
+        queue_text = "📋 **Upload Queue** (First 10)\n\n"
+        
+        for i, video in enumerate(pending, 1):
+            queue_text += f"{i}. {video['file_name']}\n"
+            queue_text += f"   Status: {video['status']}\n"
+            queue_text += f"   Added: {video['added_at'].strftime('%Y-%m-%d %H:%M')}\n\n"
+        
+        await update.message.reply_text(queue_text)
     
-    elif query.data == "start_worker":
-        if not upload_worker_running:
-            asyncio.create_task(upload_worker())
-            await query.answer("✅ Worker started!", show_alert=True)
-        else:
-            await query.answer("⚠️ Already running!", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error showing queue: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def clear_failed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear all failed uploads"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only command")
+        return
     
-    elif query.data == "stop_worker":
-        upload_worker_running = False
-        await query.answer("✅ Worker stopping...", show_alert=True)
+    try:
+        count = await database.clear_failed_uploads()
+        await update.message.reply_text(f"✅ Cleared {count} failed uploads")
+    except Exception as e:
+        logger.error(f"Error clearing failed: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # ==================== MAIN ====================
 
-async def main():
-    """Main function"""
-    global bot_app
-    
-    logger.info("🚀 Starting LuluStream Bot...")
-    
-    # Connect to MongoDB
+async def post_init(application: Application):
+    """Post initialization"""
+    # Connect to database
     await database.connect_db()
+    logger.info("✅ Database connected")
+
+async def post_shutdown(application: Application):
+    """Cleanup before shutdown"""
+    global worker_running, scheduler_running, worker_task, scheduler_task
     
-    # Start web server for Koyeb health checks
-    await start_web_server()
+    # Stop worker
+    if worker_running:
+        worker_running = False
+        if worker_task:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
     
-    # Create bot application
-    bot_app = Application.builder().token(config.BOT_TOKEN).build()
+    # Stop scheduler
+    if scheduler_running:
+        scheduler_running = False
+        if scheduler_task:
+            scheduler_task.cancel()
+            try:
+                await scheduler_task
+            except asyncio.CancelledError:
+                pass
     
-    # Add handlers
-    bot_app.add_handler(CommandHandler("start", start_command))
-    bot_app.add_handler(CommandHandler("stats", stats_command))
-    bot_app.add_handler(CommandHandler("start_worker", start_worker_command))
-    bot_app.add_handler(CommandHandler("stop_worker", stop_worker_command))
-    bot_app.add_handler(CommandHandler("start_scheduler", start_scheduler_command))
-    bot_app.add_handler(CommandHandler("stop_scheduler", stop_scheduler_command))
-    bot_app.add_handler(CommandHandler("post_now", post_now_command))
+    # Close database
+    await database.close_db()
+    logger.info("✅ Cleanup completed")
+
+def main():
+    """Start the bot"""
+    # Create application
+    application = Application.builder().token(config.BOT_TOKEN).build()
     
-    # Storage channel handlers (handles both messages and channel posts)
-    bot_app.add_handler(MessageHandler(
-        (filters.Chat(config.STORAGE_CHANNEL_ID) | filters.Chat(username=f"@{config.STORAGE_CHANNEL_ID}")) & 
-        (filters.VIDEO | filters.Document.ALL),
-        handle_storage_file
-    ))
-    bot_app.add_handler(MessageHandler(
-        (filters.Chat(config.STORAGE_CHANNEL_ID) | filters.Chat(username=f"@{config.STORAGE_CHANNEL_ID}")) & 
-        filters.TEXT & ~filters.COMMAND,
-        handle_storage_link
-    ))
+    # Register handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("add_url", add_url_command))
     
-    # Callback query handler
-    bot_app.add_handler(CallbackQueryHandler(callback_handler))
+    # Admin commands
+    application.add_handler(CommandHandler("start_worker", start_worker_command))
+    application.add_handler(CommandHandler("stop_worker", stop_worker_command))
+    application.add_handler(CommandHandler("start_scheduler", start_scheduler_command))
+    application.add_handler(CommandHandler("stop_scheduler", stop_scheduler_command))
+    application.add_handler(CommandHandler("post_now", post_now_command))
+    application.add_handler(CommandHandler("queue", queue_command))
+    application.add_handler(CommandHandler("clear_failed", clear_failed_command))
+    
+    # Message handlers
+    application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video_message))
+    
+    # Post init and shutdown
+    application.post_init = post_init
+    application.post_shutdown = post_shutdown
     
     # Start bot
-    logger.info("✅ Bot is running!")
-    logger.info("🌐 Web server: http://0.0.0.0:8000")
-    
-    # Run bot
-    await bot_app.initialize()
-    await bot_app.start()
-    await bot_app.updater.start_polling()
-    
-    # Keep running
-    await asyncio.Event().wait()
+    logger.info("🚀 Bot started!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("\n👋 Bot stopped by user")
+    main()
+            
