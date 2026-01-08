@@ -25,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize LuluStream client
-lulu_client = LuluStreamClient(config.LULUSTREAM_API_KEY)
+lulu_client = LuluStreamClient()  # ✅ CORRECT
 
 # Global worker control
 worker_running = False
